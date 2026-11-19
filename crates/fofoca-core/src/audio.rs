@@ -1,0 +1,232 @@
+//! Audio helpers. All audio in fo-foca is 16 kHz mono signed 16-bit.
+
+use anyhow::{bail, Context, Result};
+use std::io::Cursor;
+use std::path::Path;
+
+use crate::model::Track;
+
+pub const SAMPLE_RATE: u32 = 16_000;
+
+/// Root-mean-square level of a block, in 0.0..=1.0.
+pub fn rms(samples: &[i16]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = samples.iter().map(|&s| (s as f64 / i16::MAX as f64).powi(2)).sum();
+    (sum / samples.len() as f64).sqrt() as f32
+}
+
+/// Mix two tracks into one, padding the shorter with silence.
+pub fn mix(a: &[i16], b: &[i16]) -> Vec<i16> {
+    let n = a.len().max(b.len());
+    (0..n)
+        .map(|i| {
+            let s = *a.get(i).unwrap_or(&0) as i32 + *b.get(i).unwrap_or(&0) as i32;
+            s.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+        })
+        .collect()
+}
+
+/// Decide whether a time range (seconds, relative to the chunk) was spoken on the mic or the call.
+///
+/// The louder track over the range wins; the mic gets a small handicap because it also picks up
+/// the call from speakers when no headphones are used.
+pub fn attribute(mic: &[i16], sys: &[i16], start_s: f64, end_s: f64) -> Track {
+    let range = |v: &[i16]| {
+        let a = ((start_s.max(0.0) * SAMPLE_RATE as f64) as usize).min(v.len());
+        let b = ((end_s.max(start_s) * SAMPLE_RATE as f64) as usize).clamp(a, v.len());
+        rms(&v[a..b])
+    };
+    if range(mic) >= range(sys) * 1.2 {
+        Track::You
+    } else if range(sys) > 0.0 {
+        Track::Call
+    } else {
+        Track::You
+    }
+}
+
+/// Pick where to end a chunk: the quietest 100 ms frame within the last `search` samples before
+/// `target`, so a fixed cut doesn't split a word (measured: "deu ghost" → "de Augusto" at a hard
+/// 30 s cut). Returns the cut index (≤ `target`). Both tracks count — the louder one decides.
+pub fn quiet_cut(a: &[i16], b: &[i16], target: usize, search: usize) -> usize {
+    const FRAME: usize = (SAMPLE_RATE / 10) as usize;
+    let len = a.len().max(b.len());
+    if len <= target {
+        return len;
+    }
+    let from = target.saturating_sub(search);
+    let frame_level = |start: usize| {
+        let seg = |v: &[i16]| rms(&v[start.min(v.len())..(start + FRAME).min(v.len())]);
+        seg(a).max(seg(b))
+    };
+    let mut best = (target, f32::MAX);
+    let mut start = from;
+    while start + FRAME <= target {
+        let l = frame_level(start);
+        if l < best.1 {
+            best = (start + FRAME / 2, l);
+        }
+        start += FRAME;
+    }
+    best.0
+}
+
+/// Encode samples as an in-memory WAV file (for HTTP upload).
+pub fn wav_bytes(samples: &[i16]) -> Vec<u8> {
+    let mut buf = Cursor::new(Vec::with_capacity(44 + samples.len() * 2));
+    {
+        let mut w = hound::WavWriter::new(&mut buf, spec()).expect("in-memory wav");
+        for &s in samples {
+            w.write_sample(s).expect("in-memory wav");
+        }
+        w.finalize().expect("in-memory wav");
+    }
+    buf.into_inner()
+}
+
+/// Read a 16 kHz mono 16-bit WAV file.
+pub fn read_wav(path: &Path) -> Result<Vec<i16>> {
+    let mut r = hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let s = r.spec();
+    if s.sample_rate != SAMPLE_RATE || s.channels != 1 || s.bits_per_sample != 16 {
+        bail!(
+            "{} is {} Hz / {} ch / {} bit; fo-foca needs 16000 Hz mono 16-bit \
+             (convert with: ffmpeg -i in -ar 16000 -ac 1 out.wav)",
+            path.display(),
+            s.sample_rate,
+            s.channels,
+            s.bits_per_sample
+        );
+    }
+    Ok(r.samples::<i16>().collect::<Result<_, _>>()?)
+}
+
+/// A WAV file that grows chunk by chunk during a meeting.
+pub struct WavAppender(hound::WavWriter<std::io::BufWriter<std::fs::File>>);
+
+impl WavAppender {
+    pub fn create(path: &Path) -> Result<Self> {
+        Ok(Self(hound::WavWriter::create(path, spec())?))
+    }
+    pub fn append(&mut self, samples: &[i16]) -> Result<()> {
+        for &s in samples {
+            self.0.write_sample(s)?;
+        }
+        self.0.flush()?;
+        Ok(())
+    }
+    pub fn finish(self) -> Result<()> {
+        Ok(self.0.finalize()?)
+    }
+}
+
+/// Convert little-endian bytes to samples. `carry` holds a dangling odd byte between reads.
+pub fn bytes_to_samples(bytes: &[u8], carry: &mut Option<u8>) -> Vec<i16> {
+    let mut out = Vec::with_capacity(bytes.len() / 2 + 1);
+    let mut it = bytes.iter().copied();
+    if let Some(lo) = carry.take() {
+        match it.next() {
+            Some(hi) => out.push(i16::from_le_bytes([lo, hi])),
+            None => {
+                *carry = Some(lo);
+                return out;
+            }
+        }
+    }
+    loop {
+        match (it.next(), it.next()) {
+            (Some(lo), Some(hi)) => out.push(i16::from_le_bytes([lo, hi])),
+            (Some(lo), None) => {
+                *carry = Some(lo);
+                break;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+fn spec() -> hound::WavSpec {
+    hound::WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tone(n: usize, amp: i16) -> Vec<i16> {
+        (0..n).map(|i| if i % 2 == 0 { amp } else { -amp }).collect()
+    }
+
+    #[test]
+    fn rms_of_silence_and_full_scale() {
+        assert_eq!(rms(&[]), 0.0);
+        assert_eq!(rms(&[0; 100]), 0.0);
+        assert!((rms(&tone(100, i16::MAX)) - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn mix_pads_and_clamps() {
+        let m = mix(&[i16::MAX, 1, 2], &[10]);
+        assert_eq!(m, vec![i16::MAX, 1, 2]);
+    }
+
+    #[test]
+    fn attribution_follows_the_louder_track() {
+        let sr = SAMPLE_RATE as usize;
+        // mic loud in the first second, call loud in the second
+        let mut mic = tone(sr, 8000);
+        mic.extend(tone(sr, 200));
+        let mut sys = tone(sr, 300);
+        sys.extend(tone(sr, 9000));
+        assert_eq!(attribute(&mic, &sys, 0.0, 1.0), Track::You);
+        assert_eq!(attribute(&mic, &sys, 1.0, 2.0), Track::Call);
+        // out-of-range timestamps don't panic
+        assert_eq!(attribute(&mic, &sys, 5.0, 9.0), Track::You);
+    }
+
+    #[test]
+    fn quiet_cut_finds_the_pause() {
+        let sr = SAMPLE_RATE as usize;
+        // 10 s of speech with a 0.3 s pause at 8.5 s
+        let mut a = tone(10 * sr, 6000);
+        for s in &mut a[(85 * sr / 10)..(88 * sr / 10)] {
+            *s = 0;
+        }
+        let cut = quiet_cut(&a, &[], 9 * sr, 3 * sr);
+        assert!(cut >= 85 * sr / 10 && cut <= 88 * sr / 10, "cut at {cut}");
+        // shorter than the target: take everything
+        assert_eq!(quiet_cut(&a[..sr], &[], 9 * sr, 3 * sr), sr);
+    }
+
+    #[test]
+    fn wav_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("fofoca-wav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.wav");
+        let mut w = WavAppender::create(&p).unwrap();
+        w.append(&[1, 2, 3]).unwrap();
+        w.append(&[4]).unwrap();
+        w.finish().unwrap();
+        assert_eq!(read_wav(&p).unwrap(), vec![1, 2, 3, 4]);
+        assert!(wav_bytes(&[1, 2]).starts_with(b"RIFF"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bytes_to_samples_handles_odd_reads() {
+        let mut carry = None;
+        let a = bytes_to_samples(&[0x01, 0x00, 0x02], &mut carry);
+        assert_eq!(a, vec![1]);
+        let b = bytes_to_samples(&[0x00, 0xff, 0xff], &mut carry);
+        assert_eq!(b, vec![2, -1]);
+        assert_eq!(carry, None);
+    }
+}

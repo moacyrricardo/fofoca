@@ -1,0 +1,19 @@
+//! fo-foca core: everything that isn't UI.
+//!
+//! The desktop app (Tauri) and the `fofoca-cli` binary are thin shells over this crate.
+
+pub mod audio;
+pub mod capture;
+pub mod config;
+pub mod llm;
+pub mod model;
+pub mod prompts;
+pub mod servers;
+pub mod session;
+pub mod store;
+pub mod whisper;
+
+pub use config::Config;
+pub use model::{MeetingMeta, Segment, Summary, Track, Word};
+pub use session::{ModelState, Session, SessionEvent};
+pub use store::Store;

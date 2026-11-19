@@ -1,0 +1,8 @@
+/target
+node_modules/
+/app/dist/
+/app/src-tauri/gen/
+*.log
+.worktrees/
+/app/src-tauri/icons/android/
+/app/src-tauri/icons/ios/
