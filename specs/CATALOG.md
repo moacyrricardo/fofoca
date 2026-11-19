@@ -8,3 +8,5 @@
 | 004 | todo   | calendar-ical               | —                                        | —     |       |
 | 005 | todo   | grounded-summary-tasks      | —                                        | —     |       |
 | 006 | todo   | packaging-model-servers     | —                                        | —     |       |
+| 007 | todo   | meeting-labels              | —                                        | —     | ships before 008 |
+| 008 | concern| mcp-server                  | —                                        | —     | builds on 007 labels |
