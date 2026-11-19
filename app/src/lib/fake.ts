@@ -47,7 +47,7 @@ const events: CalendarEvent[] = [
   { uid: "1", title: "Sync semanal — produto", start: at(new Date().getHours() + 1), end: at(new Date().getHours() + 1, 30), all_day: false, call_link: "https://meet.google.com/abc-defg-hij", attendees: ["Rodrigo Lima", "Fernanda", "Ana"], calendar: "Trabalho" },
   { uid: "2", title: "Kickoff cliente BH", start: at(new Date().getHours() + 3), end: at(new Date().getHours() + 4), all_day: false, call_link: "https://zoom.us/j/123", attendees: ["Ana"], calendar: "Trabalho" },
 ];
-let calSettings: CalendarSettings = { sources: [{ id: "cal-1", kind: "link", label: "Trabalho", location: "calendar.google.com" }], only_with_call_link: true };
+let calSettings: CalendarSettings = { sources: [{ id: "cal-1", kind: "link", label: "Trabalho", location: "calendar.google.com" }], only_with_call_link: true, notify_before: true, auto_record: false };
 
 let listener: ((e: SessionEvent) => void) | null = null;
 let timers: number[] = [];
@@ -64,7 +64,8 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
     case "get_config": return config as T;
     case "calendar_settings": return calSettings as T;
     case "upcoming_events": return { events, errors: [] } as T;
-    case "set_calendar_filter": calSettings = { ...calSettings, only_with_call_link: Boolean(args?.onlyWithCallLink) }; return calSettings as T;
+    case "set_calendar_options": calSettings = { ...calSettings, only_with_call_link: Boolean(args?.onlyWithCallLink), notify_before: Boolean(args?.notifyBefore), auto_record: Boolean(args?.autoRecord) }; return calSettings as T;
+    case "notify": console.log("notify", args); return undefined as T;
     case "remove_calendar": calSettings = { ...calSettings, sources: calSettings.sources.filter((s) => s.id !== args?.id) }; return undefined as T;
     case "add_calendar": {
       const src = { id: `cal-${Date.now()}`, kind: "link" as const, label: "Pessoal", location: "calendar.google.com" };

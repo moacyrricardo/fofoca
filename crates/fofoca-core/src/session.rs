@@ -81,8 +81,8 @@ struct Shared {
 
 impl Session {
     /// Create the meeting folder, start both captures immediately and start loading Whisper.
-    pub fn start(cfg: Config, store: Store, title: &str, on_event: EventSink) -> Result<Session> {
-        let meeting = store.create(title)?;
+    pub fn start(cfg: Config, store: Store, title: &str, attendees: &[String], on_event: EventSink) -> Result<Session> {
+        let meeting = store.create(title, attendees)?;
         let mic = Capture::start(Source::Microphone)?;
         let sys = Capture::start(Source::SystemAudio)?;
         on_event(SessionEvent::Started { meeting: meeting.clone() });

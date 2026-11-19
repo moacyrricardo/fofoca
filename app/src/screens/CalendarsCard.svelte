@@ -40,10 +40,15 @@
     }
   }
 
-  async function toggleFilter(e: Event) {
-    const v = (e.target as HTMLInputElement).checked;
+  async function setOption(key: "only_with_call_link" | "notify_before" | "auto_record", e: Event) {
+    if (!settings) return;
+    const next = { ...settings, [key]: (e.target as HTMLInputElement).checked };
     try {
-      settings = await api.setCalendarFilter(v);
+      settings = await api.setCalendarOptions({
+        onlyWithCallLink: next.only_with_call_link,
+        notifyBefore: next.notify_before,
+        autoRecord: next.auto_record,
+      });
     } catch (err) {
       notify(String(err), true);
     }
@@ -79,7 +84,10 @@
       <input type="text" placeholder="Paste a secret iCal link (https://calendar.google.com/…/basic.ics) or .ics path" bind:value={input} disabled={adding} spellcheck="false" autocomplete="off" />
       <button class="btn teal sm" type="submit" disabled={adding || !input.trim()}>{adding ? "Checking…" : "Add"}</button>
     </form>
-    <label class="opt"><input type="checkbox" checked={settings.only_with_call_link} onchange={toggleFilter} /> Only show events with a call link (Meet, Zoom, Teams)</label>
+    <label class="opt"><input type="checkbox" checked={settings.only_with_call_link} onchange={(e) => setOption("only_with_call_link", e)} /> Only show events with a call link (Meet, Zoom, Teams)</label>
+    <label class="opt"><input type="checkbox" checked={settings.notify_before} onchange={(e) => setOption("notify_before", e)} /> Notify me about a minute before a meeting starts</label>
+    <label class="opt"><input type="checkbox" checked={settings.auto_record} onchange={(e) => setOption("auto_record", e)} />
+      <span>Start recording automatically when a meeting begins <span class="faint">— only while fo-foca is open; you can stop or discard anytime</span></span></label>
   {:else}
     <p class="faint">Loading…</p>
   {/if}

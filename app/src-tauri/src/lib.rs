@@ -10,6 +10,7 @@ use fofoca_core::{Config, MeetingMeta, Session, SessionEvent, Store};
 use serde::Serialize;
 use tauri::image::Image;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_notification::NotificationExt;
 
 struct AppState {
     cfg: Config,
@@ -70,7 +71,7 @@ fn active_session(state: State<AppState>) -> Option<MeetingMeta> {
 }
 
 #[tauri::command]
-fn start_session(app: AppHandle, state: State<AppState>, title: String) -> CmdResult<MeetingMeta> {
+fn start_session(app: AppHandle, state: State<AppState>, title: String, attendees: Option<Vec<String>>) -> CmdResult<MeetingMeta> {
     let mut slot = state.session.lock().unwrap();
     if slot.is_some() {
         return Err("a recording is already running".into());
@@ -83,7 +84,7 @@ fn start_session(app: AppHandle, state: State<AppState>, title: String) -> CmdRe
         }
         let _ = handle.emit("session", &e);
     });
-    let session = Session::start(state.cfg.clone(), state.store.clone(), &title, sink).map_err(err)?;
+    let session = Session::start(state.cfg.clone(), state.store.clone(), &title, &attendees.unwrap_or_default(), sink).map_err(err)?;
     let meta = session.meeting.clone();
     *slot = Some(session);
     Ok(meta)
@@ -143,10 +144,28 @@ fn remove_calendar(state: State<AppState>, id: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-fn set_calendar_filter(state: State<AppState>, only_with_call_link: bool) -> CmdResult<CalendarSettings> {
-    let s = state.calendars.set_only_with_call_link(only_with_call_link).map_err(err)?;
+fn set_calendar_options(
+    state: State<AppState>,
+    only_with_call_link: bool,
+    notify_before: bool,
+    auto_record: bool,
+) -> CmdResult<CalendarSettings> {
+    let s = state
+        .calendars
+        .update(|s| {
+            s.only_with_call_link = only_with_call_link;
+            s.notify_before = notify_before;
+            s.auto_record = auto_record;
+        })
+        .map_err(err)?;
     state.upcoming.lock().unwrap().take();
     Ok(s)
+}
+
+/// Desktop notification (shown by the system even when the window is in the background).
+#[tauri::command]
+fn notify(app: AppHandle, title: String, body: String) -> CmdResult<()> {
+    app.notification().builder().title(title).body(body).show().map_err(err)
 }
 
 /// Events from now (including ones in progress) to 7 days ahead.
@@ -172,6 +191,7 @@ pub fn run() {
     let store = Store::new(cfg.meetings_dir()).expect("opening meetings folder");
     let calendars = Calendars::new(fofoca_core::config::calendars_path(), Keyring).expect("calendar client");
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState { cfg, store, session: Mutex::new(None), calendars, upcoming: Mutex::new(None) })
         .setup(|app| {
             // Embedded so the window has the seal icon even when no .desktop entry is installed
@@ -194,7 +214,8 @@ pub fn run() {
             calendar_settings,
             add_calendar,
             remove_calendar,
-            set_calendar_filter,
+            set_calendar_options,
+            notify,
             upcoming_events
         ])
         .run(tauri::generate_context!())

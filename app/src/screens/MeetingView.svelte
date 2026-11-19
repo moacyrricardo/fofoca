@@ -35,6 +35,9 @@
       {when(meeting.meta.started_at)} · {minutes(meeting.meta.duration_s)} · {meeting.segments.length} lines
       {#if !meeting.meta.finished}<span class="chip">unfinished</span>{/if}
     </div>
+    {#if meeting.meta.attendees?.length}
+      <div class="faint small">Invited: {meeting.meta.attendees.join(", ")}</div>
+    {/if}
 
     <div class="tabs">
       <button class="tab" class:on={tab === "summary"} onclick={() => (tab = "summary")}><img src={summaryIcon} alt="" />Summary</button>

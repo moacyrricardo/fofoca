@@ -298,13 +298,23 @@ pub struct CalendarSource {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CalendarSettings {
     pub sources: Vec<CalendarSource>,
-    /// Hide events without a call link from "Up next".
+    /// Hide events without a call link from "Up next" (and from notifications / auto-record).
     pub only_with_call_link: bool,
+    /// Desktop notification about a minute before a meeting starts.
+    #[serde(default = "yes")]
+    pub notify_before: bool,
+    /// Start recording automatically when a meeting begins. Opt-in.
+    #[serde(default)]
+    pub auto_record: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for CalendarSettings {
     fn default() -> Self {
-        Self { sources: Vec::new(), only_with_call_link: true }
+        Self { sources: Vec::new(), only_with_call_link: true, notify_before: true, auto_record: false }
     }
 }
 
@@ -363,11 +373,16 @@ impl<S: SecretStore> Calendars<S> {
         Ok(())
     }
 
-    pub fn set_only_with_call_link(&self, v: bool) -> Result<CalendarSettings> {
+    /// Change the options (not the sources) and save.
+    pub fn update(&self, f: impl FnOnce(&mut CalendarSettings)) -> Result<CalendarSettings> {
         let mut s = self.settings();
-        s.only_with_call_link = v;
+        f(&mut s);
         self.save(&s)?;
         Ok(s)
+    }
+
+    pub fn set_only_with_call_link(&self, v: bool) -> Result<CalendarSettings> {
+        self.update(|s| s.only_with_call_link = v)
     }
 
     /// Add a secret link (https:// or webcal://) or a local .ics path. The feed is fetched and
@@ -561,8 +576,11 @@ END:VCALENDAR\r\n";
         let (ev2, _) = cals.upcoming(utc("2026-11-19T00:00:00Z"), utc("2026-11-24T00:00:00Z"));
         assert!(ev2.len() > ev.len());
         assert!(cals.add(dir.join("missing.ics").to_str().unwrap()).is_err());
+        let s = cals.update(|s| s.auto_record = true).unwrap();
+        assert!(s.auto_record && s.notify_before && !s.only_with_call_link);
         cals.remove(&src.id).unwrap();
         assert!(cals.settings().sources.is_empty());
+        assert!(cals.settings().auto_record, "options survive removing a source");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

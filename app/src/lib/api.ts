@@ -20,14 +20,16 @@ export const api = {
   meetings: () => call<MeetingMeta[]>("list_meetings"),
   meeting: (id: string) => call<Meeting>("get_meeting", { id }),
   activeSession: () => call<MeetingMeta | null>("active_session"),
-  start: (title: string) => call<MeetingMeta>("start_session", { title }),
+  start: (title: string, attendees: string[] = []) => call<MeetingMeta>("start_session", { title, attendees }),
   summarize: () => call<void>("summarize_now"),
   stop: (summarize: boolean) => call<void>("stop_session", { summarize }),
   discard: () => call<void>("discard_session"),
   calendars: () => call<CalendarSettings>("calendar_settings"),
   addCalendar: (input: string) => call<CalendarSource>("add_calendar", { input }),
   removeCalendar: (id: string) => call<void>("remove_calendar", { id }),
-  setCalendarFilter: (onlyWithCallLink: boolean) => call<CalendarSettings>("set_calendar_filter", { onlyWithCallLink }),
+  setCalendarOptions: (o: { onlyWithCallLink: boolean; notifyBefore: boolean; autoRecord: boolean }) =>
+    call<CalendarSettings>("set_calendar_options", o),
+  notify: (title: string, body: string) => call<void>("notify", { title, body }),
   upcoming: (force = false) => call<Upcoming>("upcoming_events", { force }),
 };
 

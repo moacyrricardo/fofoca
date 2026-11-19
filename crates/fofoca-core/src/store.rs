@@ -36,7 +36,7 @@ impl Store {
     }
 
     /// Create a new meeting folder with an id derived from the local start time.
-    pub fn create(&self, title: &str) -> Result<MeetingMeta> {
+    pub fn create(&self, title: &str, attendees: &[String]) -> Result<MeetingMeta> {
         let now = chrono::Local::now();
         let mut id = now.format("%Y-%m-%d-%H%M%S").to_string();
         let mut n = 1;
@@ -51,6 +51,7 @@ impl Store {
             started_at: now.to_rfc3339(),
             duration_s: 0.0,
             finished: false,
+            attendees: attendees.to_vec(),
         };
         self.save_meta(&meta)?;
         Ok(meta)
@@ -121,7 +122,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fofoca-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let store = Store::new(&root).unwrap();
-        let mut meta = store.create("Sync").unwrap();
+        let mut meta = store.create("Sync", &["Rodrigo".into()]).unwrap();
         let seg = Segment { start: 0.0, end: 1.0, text: "Oi".into(), track: Track::You, words: vec![] };
         store.append_segment(&meta.id, &seg).unwrap();
         store.append_segment(&meta.id, &seg).unwrap();
@@ -135,7 +136,8 @@ mod tests {
         assert_eq!(m.segments.len(), 2);
         assert_eq!(m.summaries.len(), 1);
         assert!(m.meta.finished);
-        let second = store.create("").unwrap();
+        assert_eq!(store.load(&meta.id).unwrap().meta.attendees, vec!["Rodrigo".to_string()]);
+        let second = store.create("", &[]).unwrap();
         assert_ne!(second.id, meta.id);
         assert_eq!(store.list().unwrap().len(), 2);
         std::fs::remove_dir_all(&root).unwrap();

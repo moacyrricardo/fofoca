@@ -92,7 +92,7 @@ fn record(cfg: Config, store: Store, args: &[String]) -> Result<()> {
         SessionEvent::Summary { summary } => println!("--- {:?} summary ({:.1} tok/s) ---\n{}\n---", summary.kind, summary.gen_tokens_per_s, summary.text),
         other => eprintln!("{}", serde_json::to_string(other).unwrap_or_default()),
     });
-    let session = Session::start(cfg, store, &title, sink)?;
+    let session = Session::start(cfg, store, &title, &[], sink)?;
     let t0 = Instant::now();
     let mut asked = false;
     while t0.elapsed() < Duration::from_secs(seconds) {

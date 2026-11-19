@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { api, onSession, preview } from "./lib/api";
   import { live, resetLive } from "./lib/live.svelte";
-  import type { ConfigView, MeetingMeta, SessionEvent } from "./lib/types";
+  import type { CalendarEvent, ConfigView, MeetingMeta, SessionEvent } from "./lib/types";
   import { shortModel } from "./lib/format";
   import Meetings from "./screens/Meetings.svelte";
   import Live from "./screens/Live.svelte";
@@ -38,9 +38,9 @@
     screen = "meeting";
   }
 
-  async function start(title: string) {
+  async function start(title: string, attendees: string[] = []) {
     try {
-      const m = await api.start(title);
+      const m = await api.start(title, attendees);
       if (!live.meeting) resetLive(m);
       screen = "live";
     } catch (e) {
@@ -92,7 +92,44 @@
     }
   }
 
+  // ---- calendar: heads-up banner + desktop notification, optional auto-record (spec 004)
+  let banner = $state<CalendarEvent | null>(null);
+  const notified = new Set<string>();
+  const autoStarted = new Set<string>();
+
+  async function calendarTick() {
+    try {
+      const s = await api.calendars();
+      if (!s.sources.length || (!s.notify_before && !s.auto_record)) return;
+      const { events } = await api.upcoming(false);
+      const now = Date.now();
+      for (const e of events) {
+        if (e.all_day) continue;
+        const startMs = new Date(e.start).getTime();
+        const key = e.uid + e.start;
+        const untilStart = startMs - now;
+        if (s.notify_before && untilStart <= 70_000 && untilStart > -60_000 && !notified.has(key)) {
+          notified.add(key);
+          if (!live.meeting) {
+            banner = e;
+            api.notify(`${e.title} starts ${untilStart > 0 ? "in a minute" : "now"}`, s.auto_record ? "fo-foca will start recording." : "Open fo-foca to record it.").catch(() => {});
+          }
+        }
+        if (s.auto_record && untilStart <= 0 && untilStart > -120_000 && !autoStarted.has(key) && !live.meeting) {
+          autoStarted.add(key);
+          banner = null;
+          await start(e.title, e.attendees);
+          api.notify(`Recording “${e.title}”`, "Stop or discard it anytime in fo-foca.").catch(() => {});
+        }
+      }
+    } catch {
+      // calendar problems are shown in Settings / Up next, not as popups every 20 s
+    }
+  }
+
   onMount(() => {
+    calendarTick();
+    const calTimer = setInterval(calendarTick, 20_000);
     let unlisten: (() => void) | undefined;
     onSession(handle).then((u) => (unlisten = u));
     refresh();
@@ -114,7 +151,10 @@
         else if (h === "settings") screen = "settings";
       }, 50);
     }
-    return () => unlisten?.();
+    return () => {
+      unlisten?.();
+      clearInterval(calTimer);
+    };
   });
 
   const nav: { id: Screen; label: string; path: string }[] = [
@@ -157,6 +197,14 @@
   </aside>
 
   <main class="main">
+    {#if banner && !recording}
+      <div class="banner">
+        <span>📅 <b>{banner.title}</b> {new Date(banner.start).getTime() > Date.now() ? "starts in a minute" : "is starting"}</span>
+        <span class="sp"></span>
+        <button class="btn rec sm" onclick={() => { const b = banner!; banner = null; start(b.title, b.attendees); }}>● Record</button>
+        <button class="btn ghost sm" onclick={() => (banner = null)}>Dismiss</button>
+      </div>
+    {/if}
     {#if screen === "meetings"}
       <Meetings {meetings} {recording} onopen={open} onstart={start} onresume={() => (screen = "live")} onsetup={() => (screen = "settings")} />
     {:else if screen === "live"}
@@ -191,4 +239,6 @@
   .hwchip b { color: var(--ink); font-size: 12.5px; }
   .hwchip div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .main { flex: 1; min-width: 0; overflow: auto; position: relative; }
+  .banner { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px; background: #1e4650; border-bottom: 1px solid #3f8d93; padding: 10px 30px; }
+  .banner .sp { flex: 1; }
 </style>

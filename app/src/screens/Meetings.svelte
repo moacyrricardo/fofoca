@@ -10,7 +10,7 @@
     meetings: MeetingMeta[];
     recording: boolean;
     onopen: (id: string) => void;
-    onstart: (title: string) => void;
+    onstart: (title: string, attendees?: string[]) => void;
     onresume: () => void;
     onsetup: () => void;
   } = $props();
