@@ -1,3 +1,6 @@
+Status: doing
+Branch: moacyrricardo/spec-004-calendar-ical
+
 # 004 — Calendar via private iCal link
 
 ## Context
