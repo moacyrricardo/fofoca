@@ -6,6 +6,7 @@ use fofoca_core::config::config_path;
 use fofoca_core::model::Meeting;
 use fofoca_core::{Config, MeetingMeta, Session, SessionEvent, Store};
 use serde::Serialize;
+use tauri::image::Image;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 struct AppState {
@@ -114,6 +115,15 @@ pub fn run() {
     let store = Store::new(cfg.meetings_dir()).expect("opening meetings folder");
     tauri::Builder::default()
         .manage(AppState { cfg, store, session: Mutex::new(None) })
+        .setup(|app| {
+            // Embedded so the window has the seal icon even when no .desktop entry is installed
+            // (X11/XWayland). GNOME on Wayland takes the icon from the desktop entry instead —
+            // bundles ship one; for development see scripts/install-dev-desktop-entry.sh.
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_icon(Image::from_bytes(include_bytes!("../icons/128x128@2x.png"))?);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_config,
             list_meetings,
