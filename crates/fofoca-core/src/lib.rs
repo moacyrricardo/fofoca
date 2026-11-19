@@ -6,6 +6,7 @@ pub mod audio;
 pub mod calendar;
 pub mod capture;
 pub mod config;
+pub mod labels;
 pub mod llm;
 pub mod model;
 pub mod prompts;

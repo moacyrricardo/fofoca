@@ -3,10 +3,12 @@
 //! ```text
 //! fofoca-cli config                         show config path and values
 //! fofoca-cli transcribe <file.wav>          transcribe a 16 kHz mono WAV in chunks
-//! fofoca-cli record --seconds N [--title T] [--summary-at S] [--no-summary | --discard]
+//! fofoca-cli record --seconds N [--title T] [--label L]… [--summary-at S] [--no-summary | --discard]
 //! fofoca-cli summarize <meeting-id>         write a final summary for a stored meeting
-//! fofoca-cli list                           list stored meetings
-//! fofoca-cli calendar <list|add LINK|PATH|remove ID|upcoming [DAYS]>
+//! fofoca-cli list [--label L]               list stored meetings (optionally only those labelled L)
+//! fofoca-cli labels                         known labels with meeting counts
+//! fofoca-cli label <meeting-id> add|rm <label>
+//! fofoca-cli calendar <list|add LINK|PATH|remove ID|upcoming [DAYS]|labels ID [LABEL…]>
 //! ```
 
 use anyhow::{bail, Context, Result};
@@ -43,13 +45,22 @@ fn run() -> Result<()> {
         Some("summarize") => summarize(&cfg, &store, args.get(1).context("usage: summarize <meeting-id>")?),
         Some("calendar") => calendar(&args[1..]),
         Some("list") => {
-            for m in store.list()? {
-                println!("{}  {:>6}  {}{}", m.id, mmss(m.duration_s), m.title, if m.finished { "" } else { "  (unfinished)" });
+            let label = args.iter().position(|a| a == "--label").map(|i| args.get(i + 1).context("usage: list --label <label>")).transpose()?;
+            for m in store.list(label.map(String::as_str))? {
+                let labels = if m.labels.is_empty() { String::new() } else { format!("  [{}]", m.labels.join(", ")) };
+                println!("{}  {:>6}  {}{}{}", m.id, mmss(m.duration_s), m.title, labels, if m.finished { "" } else { "  (unfinished)" });
             }
             Ok(())
         }
+        Some("labels") => {
+            for (l, n) in store.known_labels()? {
+                println!("{n:>4}  {l}");
+            }
+            Ok(())
+        }
+        Some("label") => label(&store, &args[1..]),
         _ => {
-            eprintln!("usage: fofoca-cli <config|transcribe|record|summarize|list> …");
+            eprintln!("usage: fofoca-cli <config|transcribe|record|summarize|list|labels|label|calendar> …");
             Ok(())
         }
     }
@@ -92,7 +103,8 @@ fn record(cfg: Config, store: Store, args: &[String]) -> Result<()> {
         SessionEvent::Summary { summary } => println!("--- {:?} summary ({:.1} tok/s) ---\n{}\n---", summary.kind, summary.gen_tokens_per_s, summary.text),
         other => eprintln!("{}", serde_json::to_string(other).unwrap_or_default()),
     });
-    let session = Session::start(cfg, store, &title, &[], sink)?;
+    let labels: Vec<String> = args.windows(2).filter(|w| w[0] == "--label").map(|w| w[1].clone()).collect();
+    let session = Session::start(cfg, store, &title, &[], &labels, sink)?;
     let t0 = Instant::now();
     let mut asked = false;
     while t0.elapsed() < Duration::from_secs(seconds) {
@@ -110,6 +122,24 @@ fn record(cfg: Config, store: Store, args: &[String]) -> Result<()> {
         session.stop(!args.iter().any(|a| a == "--no-summary"));
     }
     session.wait();
+    Ok(())
+}
+
+fn label(store: &Store, args: &[String]) -> Result<()> {
+    const USAGE: &str = "usage: label <meeting-id> add|rm <label>";
+    let (id, op, l) = match args {
+        [id, op, l, ..] => (id, op.as_str(), l),
+        _ => bail!(USAGE),
+    };
+    let mut labels = store.load(id)?.meta.labels;
+    let n = fofoca_core::labels::normalize(l).context("empty label")?;
+    match op {
+        "add" => labels.push(n),
+        "rm" => labels.retain(|x| *x != n),
+        _ => bail!(USAGE),
+    }
+    let m = store.set_labels(id, &labels)?;
+    println!("{}: {}", m.id, m.labels.join(", "));
     Ok(())
 }
 
@@ -141,6 +171,13 @@ fn calendar(args: &[String]) -> Result<()> {
             println!("added {} ({}, {})", s.label, s.id, s.location);
         }
         Some("remove") => cals.remove(args.get(1).context("usage: calendar remove <id>")?)?,
+        Some("labels") => {
+            let id = args.get(1).context("usage: calendar labels <id> [label…]")?;
+            let s = cals.set_default_labels(id, &args[2..])?;
+            if let Some(src) = s.sources.iter().find(|x| x.id == *id) {
+                println!("{}: {}", src.label, src.default_labels.join(", "));
+            }
+        }
         Some("upcoming") => {
             let days: i64 = args.get(1).map(|d| d.parse()).transpose()?.unwrap_or(7);
             let now = chrono::Utc::now();
@@ -155,7 +192,7 @@ fn calendar(args: &[String]) -> Result<()> {
         _ => {
             let s = cals.settings();
             for src in &s.sources {
-                println!("{}  {:?}  {}  {}", src.id, src.kind, src.label, src.location);
+                println!("{}  {:?}  {}  {}  [{}]", src.id, src.kind, src.label, src.location, src.default_labels.join(", "));
             }
             println!("only events with a call link: {}", s.only_with_call_link);
         }

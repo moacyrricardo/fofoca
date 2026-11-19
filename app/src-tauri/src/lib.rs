@@ -56,8 +56,32 @@ fn get_config(state: State<AppState>) -> ConfigView {
 }
 
 #[tauri::command]
-fn list_meetings(state: State<AppState>) -> CmdResult<Vec<MeetingMeta>> {
-    state.store.list().map_err(err)
+fn list_meetings(state: State<AppState>, label: Option<String>) -> CmdResult<Vec<MeetingMeta>> {
+    state.store.list(label.as_deref()).map_err(err)
+}
+
+#[derive(Serialize)]
+struct LabelCount {
+    label: String,
+    count: usize,
+}
+
+/// Labels in use, most used first (for autocomplete and the Meetings filter).
+#[tauri::command]
+fn known_labels(state: State<AppState>) -> CmdResult<Vec<LabelCount>> {
+    Ok(state.store.known_labels().map_err(err)?.into_iter().map(|(label, count)| LabelCount { label, count }).collect())
+}
+
+#[tauri::command]
+fn set_meeting_labels(state: State<AppState>, id: String, labels: Vec<String>) -> CmdResult<MeetingMeta> {
+    let meta = state.store.set_labels(&id, &labels).map_err(err)?;
+    // Keep the live session's copy in sync so the recording screen shows the new labels.
+    if let Some(s) = state.session.lock().unwrap().as_mut() {
+        if s.meeting.id == id {
+            s.meeting.labels = meta.labels.clone();
+        }
+    }
+    Ok(meta)
 }
 
 #[tauri::command]
@@ -71,7 +95,13 @@ fn active_session(state: State<AppState>) -> Option<MeetingMeta> {
 }
 
 #[tauri::command]
-fn start_session(app: AppHandle, state: State<AppState>, title: String, attendees: Option<Vec<String>>) -> CmdResult<MeetingMeta> {
+fn start_session(
+    app: AppHandle,
+    state: State<AppState>,
+    title: String,
+    attendees: Option<Vec<String>>,
+    labels: Option<Vec<String>>,
+) -> CmdResult<MeetingMeta> {
     let mut slot = state.session.lock().unwrap();
     if slot.is_some() {
         return Err("a recording is already running".into());
@@ -84,7 +114,15 @@ fn start_session(app: AppHandle, state: State<AppState>, title: String, attendee
         }
         let _ = handle.emit("session", &e);
     });
-    let session = Session::start(state.cfg.clone(), state.store.clone(), &title, &attendees.unwrap_or_default(), sink).map_err(err)?;
+    let session = Session::start(
+        state.cfg.clone(),
+        state.store.clone(),
+        &title,
+        &attendees.unwrap_or_default(),
+        &labels.unwrap_or_default(),
+        sink,
+    )
+    .map_err(err)?;
     let meta = session.meeting.clone();
     *slot = Some(session);
     Ok(meta)
@@ -148,6 +186,13 @@ fn remove_calendar(state: State<AppState>, id: String) -> CmdResult<()> {
     state.calendars.remove(&id).map_err(err)?;
     state.upcoming.lock().unwrap().take();
     Ok(())
+}
+
+#[tauri::command]
+fn set_calendar_default_labels(state: State<AppState>, id: String, labels: Vec<String>) -> CmdResult<CalendarSettings> {
+    let s = state.calendars.set_default_labels(&id, &labels).map_err(err)?;
+    state.upcoming.lock().unwrap().take();
+    Ok(s)
 }
 
 #[tauri::command]
@@ -219,6 +264,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             list_meetings,
+            known_labels,
+            set_meeting_labels,
             get_meeting,
             active_session,
             start_session,
@@ -229,6 +276,7 @@ pub fn run() {
             add_calendar,
             remove_calendar,
             set_calendar_options,
+            set_calendar_default_labels,
             notify,
             upcoming_events
         ])

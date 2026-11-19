@@ -4,10 +4,29 @@
   import { live } from "../lib/live.svelte";
   import { markdown, mmss, shortModel } from "../lib/format";
   import type { ConfigView, ModelState } from "../lib/types";
+  import LabelEditor from "./LabelEditor.svelte";
 
-  let { config, onstart, onstop, notify }: { config: ConfigView | null; onstart: (title: string) => void; onstop: () => void; notify: (t: string, e?: boolean) => void } = $props();
+  let { config, onstart, onstop, notify }: {
+    config: ConfigView | null;
+    onstart: (title: string, attendees?: string[], labels?: string[]) => void;
+    onstop: () => void;
+    notify: (t: string, e?: boolean) => void;
+  } = $props();
 
   let title = $state("");
+  let startLabels = $state<string[]>([]);
+
+  // Labels can be changed while recording; the backend merges them into meta.json.
+  async function setLiveLabels(labels: string[]) {
+    const m = live.meeting;
+    if (!m) return;
+    try {
+      const meta = await api.setMeetingLabels(m.id, labels);
+      if (live.meeting?.id === m.id) live.meeting = { ...live.meeting, labels: meta.labels };
+    } catch (e) {
+      notify(String(e), true);
+    }
+  }
   let confirmDiscard = $state(false);
 
   let txBox: HTMLDivElement | undefined = $state();
@@ -67,16 +86,18 @@
     <div class="idle">
       <h1>Record a meeting</h1>
       <p class="muted">fo-foca records your microphone and the call audio until you press Stop. Nothing is recorded before you start.</p>
-      <form class="startform" onsubmit={(e) => { e.preventDefault(); onstart(title); }}>
+      <form class="startform" onsubmit={(e) => { e.preventDefault(); onstart(title, [], startLabels); }}>
         <input type="text" placeholder="Meeting title (optional)" bind:value={title} />
         <button class="btn rec" type="submit">● Start recording</button>
       </form>
+      <div class="startlabels"><LabelEditor labels={startLabels} onchange={(l) => (startLabels = l)} placeholder="+ label" compact /></div>
     </div>
   {:else}
     <div class="livebar">
       <span class="dot live big"></span>
       <span class="timer">{mmss(s?.elapsed_s ?? 0)}</span>
-      <div class="ttl"><b>{live.meeting.title}</b><div class="faint">recording mic + system audio</div></div>
+      <div class="ttl"><b>{live.meeting.title}</b><div class="faint">recording mic + system audio</div>
+        <div class="livelabels"><LabelEditor labels={live.meeting.labels ?? []} onchange={setLiveLabels} placeholder="+ label" compact /></div></div>
       <div class="meter"><span>You</span><span class="bars">{#each bars(s?.mic_level ?? 0) as h}<i style="height:{h}px"></i>{/each}</span></div>
       <div class="meter sys"><span>Call</span><span class="bars">{#each bars(s?.call_level ?? 0) as h}<i style="height:{h}px"></i>{/each}</span></div>
       <span class="sp"></span>
@@ -180,4 +201,6 @@
   .models { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; background: var(--navy); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
   .m { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .m .chip { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+  .startlabels { margin-top: 8px; display: flex; justify-content: center; }
+  .livelabels { margin-top: 4px; }
 </style>

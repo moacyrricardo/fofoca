@@ -81,8 +81,8 @@ struct Shared {
 
 impl Session {
     /// Create the meeting folder, start both captures immediately and start loading Whisper.
-    pub fn start(cfg: Config, store: Store, title: &str, attendees: &[String], on_event: EventSink) -> Result<Session> {
-        let meeting = store.create(title, attendees)?;
+    pub fn start(cfg: Config, store: Store, title: &str, attendees: &[String], labels: &[String], on_event: EventSink) -> Result<Session> {
+        let meeting = store.create(title, attendees, labels)?;
         let mic = Capture::start(Source::Microphone)?;
         let sys = Capture::start(Source::SystemAudio)?;
         on_event(SessionEvent::Started { meeting: meeting.clone() });
@@ -211,9 +211,18 @@ impl Worker {
             (self.emit)(SessionEvent::Discarded { meeting_id: self.meeting.id.clone() });
             return;
         }
-        self.meeting.duration_s = self.offset_s;
-        self.meeting.finished = true;
-        let _ = self.store.save_meta(&self.meeting);
+        let duration = self.offset_s;
+        match self.store.update_meta(&self.meeting.id, |m| {
+            m.duration_s = duration;
+            m.finished = true;
+        }) {
+            Ok(m) => self.meeting = m,
+            Err(_) => {
+                self.meeting.duration_s = duration;
+                self.meeting.finished = true;
+                let _ = self.store.save_meta(&self.meeting);
+            }
+        }
         (self.emit)(SessionEvent::Finished { meeting: self.meeting.clone() });
     }
 

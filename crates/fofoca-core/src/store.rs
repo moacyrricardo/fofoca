@@ -13,7 +13,12 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+use crate::labels;
 use crate::model::{Meeting, MeetingMeta, Segment, Summary};
+
+/// Serializes read-modify-write of meta.json files (UI commands and the session worker run on
+/// different threads).
+static META_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone)]
 pub struct Store {
@@ -36,7 +41,7 @@ impl Store {
     }
 
     /// Create a new meeting folder with an id derived from the local start time.
-    pub fn create(&self, title: &str, attendees: &[String]) -> Result<MeetingMeta> {
+    pub fn create(&self, title: &str, attendees: &[String], labels: &[String]) -> Result<MeetingMeta> {
         let now = chrono::Local::now();
         let mut id = now.format("%Y-%m-%d-%H%M%S").to_string();
         let mut n = 1;
@@ -52,6 +57,7 @@ impl Store {
             duration_s: 0.0,
             finished: false,
             attendees: attendees.to_vec(),
+            labels: labels::normalize_all(labels),
         };
         self.save_meta(&meta)?;
         Ok(meta)
@@ -59,6 +65,35 @@ impl Store {
 
     pub fn save_meta(&self, meta: &MeetingMeta) -> Result<()> {
         write_json(&self.dir(&meta.id).join("meta.json"), meta)
+    }
+
+    /// Re-read `meta.json`, change it and write it back, so fields edited elsewhere meanwhile
+    /// (e.g. labels set while recording) are not overwritten with a stale copy.
+    pub fn update_meta(&self, id: &str, f: impl FnOnce(&mut MeetingMeta)) -> Result<MeetingMeta> {
+        let _w = META_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut meta: MeetingMeta = read_json(&self.dir(id).join("meta.json")).with_context(|| format!("meeting {id} not found"))?;
+        f(&mut meta);
+        self.save_meta(&meta)?;
+        Ok(meta)
+    }
+
+    /// Replace a meeting's labels (normalized, deduplicated).
+    pub fn set_labels<S: AsRef<str>>(&self, id: &str, new: &[S]) -> Result<MeetingMeta> {
+        let new = labels::normalize_all(new);
+        self.update_meta(id, |m| m.labels = new)
+    }
+
+    /// Every label in use with the number of meetings carrying it, most used first.
+    pub fn known_labels(&self) -> Result<Vec<(String, usize)>> {
+        let mut counts: std::collections::HashMap<String, usize> = Default::default();
+        for m in self.list(None)? {
+            for l in m.labels {
+                *counts.entry(l).or_default() += 1;
+            }
+        }
+        let mut out: Vec<_> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
     }
 
     pub fn append_segment(&self, id: &str, seg: &Segment) -> Result<()> {
@@ -90,11 +125,14 @@ impl Store {
         Ok(Meeting { meta, segments, summaries })
     }
 
-    /// All meetings, newest first. Folders without a readable meta.json are skipped.
-    pub fn list(&self) -> Result<Vec<MeetingMeta>> {
+    /// All meetings (or only those carrying `label`), newest first. Folders without a readable
+    /// meta.json are skipped.
+    pub fn list(&self, label: Option<&str>) -> Result<Vec<MeetingMeta>> {
+        let label = label.and_then(labels::normalize);
         let mut out: Vec<MeetingMeta> = std::fs::read_dir(&self.root)?
             .filter_map(|e| e.ok())
-            .filter_map(|e| read_json(&e.path().join("meta.json")).ok())
+            .filter_map(|e| read_json::<MeetingMeta>(&e.path().join("meta.json")).ok())
+            .filter(|m| label.as_ref().is_none_or(|l| m.labels.contains(l)))
             .collect();
         out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         Ok(out)
@@ -122,7 +160,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fofoca-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let store = Store::new(&root).unwrap();
-        let mut meta = store.create("Sync", &["Rodrigo".into()]).unwrap();
+        let mut meta = store.create("Sync", &["Rodrigo".into()], &[]).unwrap();
         let seg = Segment { start: 0.0, end: 1.0, text: "Oi".into(), track: Track::You, words: vec![] };
         store.append_segment(&meta.id, &seg).unwrap();
         store.append_segment(&meta.id, &seg).unwrap();
@@ -137,9 +175,22 @@ mod tests {
         assert_eq!(m.summaries.len(), 1);
         assert!(m.meta.finished);
         assert_eq!(store.load(&meta.id).unwrap().meta.attendees, vec!["Rodrigo".to_string()]);
-        let second = store.create("", &[]).unwrap();
+        let second = store.create("", &[], &["Trabalho".into(), "trabalho".into()]).unwrap();
         assert_ne!(second.id, meta.id);
-        assert_eq!(store.list().unwrap().len(), 2);
+        assert_eq!(second.labels, vec!["trabalho"]);
+        assert_eq!(store.list(None).unwrap().len(), 2);
+
+        // labels: set, filter, count; a later meta update keeps them
+        store.set_labels(&meta.id, &["Cliente BH", "trabalho", "cliente bh"]).unwrap();
+        store.update_meta(&meta.id, |m| m.duration_s = 9.0).unwrap();
+        let m = store.load(&meta.id).unwrap().meta;
+        assert_eq!(m.labels, vec!["cliente-bh", "trabalho"]);
+        assert_eq!(m.duration_s, 9.0);
+        assert_eq!(store.list(Some("Trabalho")).unwrap().len(), 2);
+        assert_eq!(store.list(Some("cliente-bh")).unwrap().len(), 1);
+        assert!(store.list(Some("nope")).unwrap().is_empty());
+        assert_eq!(store.known_labels().unwrap(), vec![("trabalho".to_string(), 2), ("cliente-bh".to_string(), 1)]);
+        assert!(store.set_labels("missing", &["x"]).is_err());
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

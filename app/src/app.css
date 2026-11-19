@@ -29,6 +29,8 @@ button { font-family: inherit; }
 .chip.gpu { color: #bfeff2; border-color: #3f8d93; background: #1d4652; }
 .chip.cpu { color: #ffd9cb; border-color: #9b5d49; background: #4a2f2a; }
 .chip.ok { color: #c9f3d6; border-color: #3f8a58; background: #1f4430; }
+.chip.label { color: #d8eef0; border-color: #35647a; background: #1a3a4f; font-weight: 600; }
+.chip.label::before { content: "#"; opacity: .55; margin-right: -3px; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
 .dot.ok { background: var(--ok); }
 .dot.live { background: var(--coral); animation: pulse 1.2s infinite; }

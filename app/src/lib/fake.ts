@@ -1,5 +1,6 @@
 // Scripted stand-in for the Rust backend, used only outside Tauri (browser preview).
 
+import { normalizeLabels } from "./format";
 import type { CalendarEvent, CalendarSettings, ConfigView, Meeting, MeetingMeta, Segment, SessionEvent } from "./types";
 
 const LINES: [string, "you" | "call"][] = [
@@ -26,8 +27,8 @@ O relatório do 3º trimestre de 2026 mostra indicadores abaixo das metas da dir
 - Enviar o follow-up por e-mail hoje.`;
 
 const meetings: Meeting[] = [
-  { meta: { id: "2026-11-19-140200", title: "Relatório Q3 — revisão com a diretoria", started_at: "2026-11-19T14:02:00-03:00", duration_s: 1104, finished: true }, segments: segs, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
-  { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true }, segments: segs.slice(0, 3), summaries: [] },
+  { meta: { id: "2026-11-19-140200", title: "Relatório Q3 — revisão com a diretoria", started_at: "2026-11-19T14:02:00-03:00", duration_s: 1104, finished: true, labels: ["trabalho", "diretoria"] }, segments: segs, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
+  { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true, labels: ["trabalho", "1:1"] }, segments: segs.slice(0, 3), summaries: [] },
 ];
 
 const config: ConfigView = {
@@ -44,10 +45,10 @@ const config: ConfigView = {
 
 const at = (h: number, m = 0) => { const d = new Date(); d.setHours(h, m, 0, 0); return d.toISOString(); };
 const events: CalendarEvent[] = [
-  { uid: "1", title: "Sync semanal — produto", start: at(new Date().getHours() + 1), end: at(new Date().getHours() + 1, 30), all_day: false, call_link: "https://meet.google.com/abc-defg-hij", attendees: ["Rodrigo Lima", "Fernanda", "Ana"], calendar: "Trabalho" },
-  { uid: "2", title: "Kickoff cliente BH", start: at(new Date().getHours() + 3), end: at(new Date().getHours() + 4), all_day: false, call_link: "https://zoom.us/j/123", attendees: ["Ana"], calendar: "Trabalho" },
+  { uid: "1", title: "Sync semanal — produto", start: at(new Date().getHours() + 1), end: at(new Date().getHours() + 1, 30), all_day: false, call_link: "https://meet.google.com/abc-defg-hij", attendees: ["Rodrigo Lima", "Fernanda", "Ana"], calendar: "Trabalho", labels: ["trabalho"] },
+  { uid: "2", title: "Kickoff cliente BH", start: at(new Date().getHours() + 3), end: at(new Date().getHours() + 4), all_day: false, call_link: "https://zoom.us/j/123", attendees: ["Ana"], calendar: "Trabalho", labels: ["trabalho"] },
 ];
-let calSettings: CalendarSettings = { sources: [{ id: "cal-1", kind: "link", label: "Trabalho", location: "calendar.google.com" }], only_with_call_link: true, notify_before: true, auto_record: false };
+let calSettings: CalendarSettings = { sources: [{ id: "cal-1", kind: "link", label: "Trabalho", location: "calendar.google.com", default_labels: ["trabalho"] }], only_with_call_link: true, notify_before: true, auto_record: false };
 
 let listener: ((e: SessionEvent) => void) | null = null;
 let timers: number[] = [];
@@ -72,10 +73,24 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       calSettings = { ...calSettings, sources: [...calSettings.sources, src] };
       return src as T;
     }
-    case "list_meetings": return meetings.map((m) => m.meta) as T;
+    case "list_meetings": return meetings.map((m) => m.meta).filter((m) => !args?.label || m.labels?.includes(String(args.label))) as T;
+    case "known_labels": {
+      const counts = new Map<string, number>();
+      meetings.forEach((m) => m.meta.labels?.forEach((l) => counts.set(l, (counts.get(l) ?? 0) + 1)));
+      return [...counts].map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)) as T;
+    }
+    case "set_meeting_labels": {
+      const m = meetings.find((x) => x.meta.id === args?.id);
+      if (!m) throw new Error("meeting not found");
+      m.meta = { ...m.meta, labels: normalizeLabels(args?.labels as string[]) };
+      return m.meta as T;
+    }
+    case "set_calendar_default_labels":
+      calSettings = { ...calSettings, sources: calSettings.sources.map((s) => (s.id === args?.id ? { ...s, default_labels: normalizeLabels(args?.labels as string[]) } : s)) };
+      return calSettings as T;
     case "get_meeting": return (meetings.find((m) => m.meta.id === args?.id) ?? meetings[0]) as T;
     case "active_session": return live as T;
-    case "start_session": return startFake(String(args?.title ?? "")) as T;
+    case "start_session": return startFake(String(args?.title ?? ""), normalizeLabels((args?.labels as string[]) ?? [])) as T;
     case "summarize_now":
       emit(status(0, "off", "loading"));
       timers.push(window.setTimeout(() => emit(status(3, "off", "busy")), 1200));
@@ -106,9 +121,9 @@ function status(backlog: number, asr: "off" | "ready" | "busy" | "loading", llm:
   return { type: "status", elapsed_s: (Date.now() - t0) / 1000, backlog_s: backlog, mic_level: Math.random() * 0.05, call_level: Math.random() * 0.04, asr, llm };
 }
 
-function startFake(title: string): MeetingMeta {
+function startFake(title: string, labels: string[]): MeetingMeta {
   t0 = Date.now();
-  live = { id: "fake-live", title: title || "Sync semanal — produto", started_at: new Date().toISOString(), duration_s: 0, finished: false };
+  live = { id: "fake-live", title: title || "Sync semanal — produto", started_at: new Date().toISOString(), duration_s: 0, finished: false, labels };
   const meta = live;
   queueMicrotask(() => emit({ type: "started", meeting: meta }));
   timers.push(window.setInterval(() => emit(status(0, "ready", "off")), 250));

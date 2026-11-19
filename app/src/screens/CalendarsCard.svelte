@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api } from "../lib/api";
   import type { CalendarSettings } from "../lib/types";
+  import LabelEditor from "./LabelEditor.svelte";
 
   let { notify }: { notify: (t: string, e?: boolean) => void } = $props();
 
@@ -35,6 +36,14 @@
       await api.removeCalendar(id);
       settings = await api.calendars();
       notify(`Removed “${label}”.`);
+    } catch (err) {
+      notify(String(err), true);
+    }
+  }
+
+  async function setDefaultLabels(id: string, labels: string[]) {
+    try {
+      settings = await api.setCalendarDefaultLabels(id, labels);
     } catch (err) {
       notify(String(err), true);
     }
@@ -76,7 +85,10 @@
     {#each settings.sources as s (s.id)}
       <div class="src">
         <span class="dot ok"></span>
-        <div class="txt"><b>{s.label}</b><div class="faint small">{s.kind === "link" ? `${s.location} · secret link in keyring` : s.location}</div></div>
+        <div class="txt">
+          <b>{s.label}</b><div class="faint small">{s.kind === "link" ? `${s.location} · secret link in keyring` : s.location}</div>
+          <div class="deflabels"><span class="faint small">Label recordings:</span><LabelEditor labels={s.default_labels ?? []} onchange={(l) => setDefaultLabels(s.id, l)} placeholder="+ label" compact /></div>
+        </div>
         <button class="btn ghost sm" onclick={() => remove(s.id, s.label)}>Remove</button>
       </div>
     {/each}
@@ -102,6 +114,7 @@
   .help { margin: 8px 0 6px; padding-left: 20px; line-height: 1.6; font-size: 13.5px; }
   .src { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
   .src .txt { flex: 1; min-width: 0; }
+  .deflabels { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
   .add { display: flex; gap: 10px; margin-top: 12px; }
   .add input { flex: 1; }
   .opt { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: 13.5px; color: var(--ink-2); cursor: pointer; }
