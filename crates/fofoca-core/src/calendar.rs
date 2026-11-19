@@ -347,6 +347,8 @@ pub struct Calendars<S: SecretStore> {
     path: PathBuf,
     secrets: S,
     http: reqwest::blocking::Client,
+    /// Serializes read-modify-write of the settings file (commands run on parallel threads).
+    write: std::sync::Mutex<()>,
 }
 
 impl<S: SecretStore> Calendars<S> {
@@ -358,6 +360,7 @@ impl<S: SecretStore> Calendars<S> {
                 .timeout(std::time::Duration::from_secs(20))
                 .user_agent("fo-foca")
                 .build()?,
+            write: Default::default(),
         })
     }
 
@@ -375,6 +378,7 @@ impl<S: SecretStore> Calendars<S> {
 
     /// Change the options (not the sources) and save.
     pub fn update(&self, f: impl FnOnce(&mut CalendarSettings)) -> Result<CalendarSettings> {
+        let _w = self.write.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = self.settings();
         f(&mut s);
         self.save(&s)?;
@@ -389,14 +393,17 @@ impl<S: SecretStore> Calendars<S> {
     /// parsed first, so a wrong link is rejected before anything is stored.
     pub fn add(&self, input: &str) -> Result<CalendarSource> {
         let input = input.trim();
-        let id = format!("cal-{}", Utc::now().timestamp_millis());
-        let (kind, location, text) = if input.starts_with("https://") || input.starts_with("webcal://") || input.starts_with("http://") {
+        let is_link = input.starts_with("https://") || input.starts_with("webcal://") || input.starts_with("http://");
+        let path = PathBuf::from(input.trim_start_matches("file://"));
+        if self.find_existing(input, is_link, &path).is_some() {
+            bail!("that calendar is already added");
+        }
+        let (kind, location, text) = if is_link {
             let url = normalize_url(input);
             let host = url.split('/').nth(2).unwrap_or("calendar").to_string();
             let text = self.fetch(&url)?;
             (SourceKind::Link, host, text)
         } else {
-            let path = PathBuf::from(input.trim_start_matches("file://"));
             let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
             (SourceKind::File, path.display().to_string(), text)
         };
@@ -407,17 +414,41 @@ impl<S: SecretStore> Calendars<S> {
             SourceKind::Link => location.clone(),
             SourceKind::File => PathBuf::from(&location).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
         });
+        // The fetch above ran unlocked; re-check under the lock in case the same calendar was
+        // added meanwhile, and keep ids unique even for adds in the same millisecond.
+        let _w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        if self.find_existing(input, is_link, &path).is_some() {
+            bail!("that calendar is already added");
+        }
+        let mut s = self.settings();
+        let mut n = Utc::now().timestamp_millis();
+        while s.sources.iter().any(|x| x.id == format!("cal-{n}")) {
+            n += 1;
+        }
+        let id = format!("cal-{n}");
         if kind == SourceKind::Link {
             self.secrets.set(&id, &normalize_url(input))?;
         }
         let source = CalendarSource { id, kind, label, location };
-        let mut s = self.settings();
         s.sources.push(source.clone());
         self.save(&s)?;
         Ok(source)
     }
 
+    /// The id of an already-added source with the same link (compared via the keyring) or file.
+    fn find_existing(&self, input: &str, is_link: bool, path: &std::path::Path) -> Option<String> {
+        let url = normalize_url(input);
+        self.settings().sources.into_iter().find_map(|x| {
+            let same = match x.kind {
+                SourceKind::Link => is_link && self.secrets.get(&x.id).is_ok_and(|u| u == url),
+                SourceKind::File => !is_link && std::path::Path::new(&x.location) == path,
+            };
+            same.then_some(x.id)
+        })
+    }
+
     pub fn remove(&self, id: &str) -> Result<()> {
+        let _w = self.write.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = self.settings();
         if let Some(src) = s.sources.iter().find(|x| x.id == id) {
             if src.kind == SourceKind::Link {
@@ -581,6 +612,30 @@ END:VCALENDAR\r\n";
         cals.remove(&src.id).unwrap();
         assert!(cals.settings().sources.is_empty());
         assert!(cals.settings().auto_record, "options survive removing a source");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn several_calendars_merge_and_reject_duplicates() {
+        let dir = std::env::temp_dir().join(format!("fofoca-cal-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.ics"), dir.join("b.ics"));
+        std::fs::write(&a, ICS).unwrap();
+        std::fs::write(&b, ICS.replace("X-WR-CALNAME:Trabalho", "X-WR-CALNAME:Pessoal")).unwrap();
+        let cals = Calendars::new(dir.join("calendars.json"), Mem::default()).unwrap();
+        cals.set_only_with_call_link(false).unwrap();
+        let sa = cals.add(a.to_str().unwrap()).unwrap();
+        let sb = cals.add(b.to_str().unwrap()).unwrap();
+        assert_ne!(sa.id, sb.id);
+        assert!(cals.add(a.to_str().unwrap()).is_err(), "same file twice is rejected");
+        assert_eq!(cals.settings().sources.len(), 2);
+        let (ev, errs) = cals.upcoming(utc("2026-11-19T00:00:00Z"), utc("2026-11-24T00:00:00Z"));
+        assert!(errs.is_empty());
+        let labels: HashSet<_> = ev.iter().map(|e| e.calendar.as_str()).collect();
+        assert_eq!(labels, HashSet::from(["Trabalho", "Pessoal"]));
+        cals.remove(&sa.id).unwrap();
+        assert_eq!(cals.settings().sources.iter().map(|s| &s.id).collect::<Vec<_>>(), vec![&sb.id]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

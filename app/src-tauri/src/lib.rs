@@ -129,11 +129,18 @@ fn calendar_settings(state: State<AppState>) -> CalendarSettings {
 }
 
 /// Validates the link (or .ics path) by fetching and parsing it before storing anything.
-#[tauri::command(async)]
-fn add_calendar(state: State<'_, AppState>, input: String) -> CmdResult<CalendarSource> {
-    let src = state.calendars.add(&input).map_err(err)?;
-    state.upcoming.lock().unwrap().take();
-    Ok(src)
+/// Runs on a blocking thread: the calendar client uses `reqwest::blocking`, which panics when
+/// called from inside the async runtime (the command would then never answer the UI).
+#[tauri::command]
+async fn add_calendar(app: AppHandle, input: String) -> CmdResult<CalendarSource> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let src = state.calendars.add(&input).map_err(err)?;
+        state.upcoming.lock().unwrap().take();
+        Ok(src)
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -169,8 +176,15 @@ fn notify(app: AppHandle, title: String, body: String) -> CmdResult<()> {
 }
 
 /// Events from now (including ones in progress) to 7 days ahead.
-#[tauri::command(async)]
-fn upcoming_events(state: State<'_, AppState>, force: bool) -> Upcoming {
+/// On a blocking thread for the same reason as `add_calendar`.
+#[tauri::command]
+async fn upcoming_events(app: AppHandle, force: bool) -> CmdResult<Upcoming> {
+    tauri::async_runtime::spawn_blocking(move || fetch_upcoming(&app.state::<AppState>(), force))
+        .await
+        .map_err(err)
+}
+
+fn fetch_upcoming(state: &AppState, force: bool) -> Upcoming {
     if !force {
         if let Some((at, u)) = state.upcoming.lock().unwrap().as_ref() {
             if at.elapsed() < CALENDAR_TTL {
