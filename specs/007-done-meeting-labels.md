@@ -1,3 +1,6 @@
+Status: done
+Branch: moacyrricardo/spec-007-meeting-labels
+
 # 007 — Meeting labels
 
 ## Context
@@ -45,3 +48,25 @@ need categories. Labels are useful on their own, so they ship first; 008 builds 
 - Suggesting labels automatically (from attendees' past meetings or the summary model) — later.
 - Renaming / merging a label across all meetings — later (can be done by hand via the CLI).
 - MCP exposure and filtering by label there → concern **008**.
+
+## Implementation Notes
+
+- Built as specified. Labels are also editable **while recording** (Record screen bar), not only
+  at start and on the meeting page.
+- **Bug found on the way:** the session worker rewrote `meta.json` from its start-time copy when a
+  recording finished, which would have dropped labels set during the call. Added
+  `Store::update_meta(id, f)` (re-read → change → write, under a process-wide lock); the worker and
+  `set_labels` use it.
+- Normalization also trims a trailing `-` left by the 32-character cut. The UI mirrors it in
+  `format.ts` (`normalizeLabel`) for the start form, which has no backend round trip until Start.
+- Calendar default labels are copied onto each upcoming `CalendarEvent.labels` in core, so the UI
+  passes `e.labels` when recording (Up next, heads-up banner, auto-record) without knowing the
+  source id. CLI: `fofoca-cli calendar labels <id> [label…]`.
+- Meetings filter: chips with counts are derived client-side from the already-loaded list;
+  selecting several shows meetings carrying **all** of them. `list_meetings(label?)` /
+  `Store::list(Option<&str>)` still filter server-side for the CLI and the future MCP server (008).
+- Extra CLI flag: `fofoca-cli record --label L` (repeatable).
+- Shared UI component `LabelEditor.svelte` (chips + input, Enter/comma adds, Backspace removes the
+  last, `<datalist>` autocomplete from `known_labels`).
+- Stacked on spec 004 (`moacyrricardo/spec-004-calendar-ical`): default labels live on calendar
+  sources and attendees/labels share `Store::create`.
