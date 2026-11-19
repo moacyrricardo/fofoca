@@ -24,6 +24,14 @@ export type SessionEvent =
   | { type: "notice"; message: string }
   | { type: "error"; message: string };
 
+export interface CalendarEvent {
+  uid: string; title: string; start: string; end: string; all_day: boolean;
+  call_link: string | null; attendees: string[]; calendar: string;
+}
+export interface CalendarSource { id: string; kind: "link" | "file"; label: string; location: string }
+export interface CalendarSettings { sources: CalendarSource[]; only_with_call_link: boolean }
+export interface Upcoming { events: CalendarEvent[]; errors: string[] }
+
 export interface ConfigView {
   path: string;
   meetings_dir: string;

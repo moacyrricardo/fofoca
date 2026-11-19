@@ -1,6 +1,6 @@
 // Scripted stand-in for the Rust backend, used only outside Tauri (browser preview).
 
-import type { ConfigView, Meeting, MeetingMeta, Segment, SessionEvent } from "./types";
+import type { CalendarEvent, CalendarSettings, ConfigView, Meeting, MeetingMeta, Segment, SessionEvent } from "./types";
 
 const LINES: [string, "you" | "call"][] = [
   ["Bom dia a todos. Conforme deliberado na reunião anterior, apresento o relatório consolidado referente ao terceiro trimestre de 2026.", "you"],
@@ -42,6 +42,13 @@ const config: ConfigView = {
   },
 };
 
+const at = (h: number, m = 0) => { const d = new Date(); d.setHours(h, m, 0, 0); return d.toISOString(); };
+const events: CalendarEvent[] = [
+  { uid: "1", title: "Sync semanal — produto", start: at(new Date().getHours() + 1), end: at(new Date().getHours() + 1, 30), all_day: false, call_link: "https://meet.google.com/abc-defg-hij", attendees: ["Rodrigo Lima", "Fernanda", "Ana"], calendar: "Trabalho" },
+  { uid: "2", title: "Kickoff cliente BH", start: at(new Date().getHours() + 3), end: at(new Date().getHours() + 4), all_day: false, call_link: "https://zoom.us/j/123", attendees: ["Ana"], calendar: "Trabalho" },
+];
+let calSettings: CalendarSettings = { sources: [{ id: "cal-1", kind: "link", label: "Trabalho", location: "calendar.google.com" }], only_with_call_link: true };
+
 let listener: ((e: SessionEvent) => void) | null = null;
 let timers: number[] = [];
 let live: MeetingMeta | null = null;
@@ -55,6 +62,15 @@ export function onSession(cb: (e: SessionEvent) => void): () => void {
 export async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   switch (cmd) {
     case "get_config": return config as T;
+    case "calendar_settings": return calSettings as T;
+    case "upcoming_events": return { events, errors: [] } as T;
+    case "set_calendar_filter": calSettings = { ...calSettings, only_with_call_link: Boolean(args?.onlyWithCallLink) }; return calSettings as T;
+    case "remove_calendar": calSettings = { ...calSettings, sources: calSettings.sources.filter((s) => s.id !== args?.id) }; return undefined as T;
+    case "add_calendar": {
+      const src = { id: `cal-${Date.now()}`, kind: "link" as const, label: "Pessoal", location: "calendar.google.com" };
+      calSettings = { ...calSettings, sources: [...calSettings.sources, src] };
+      return src as T;
+    }
     case "list_meetings": return meetings.map((m) => m.meta) as T;
     case "get_meeting": return (meetings.find((m) => m.meta.id === args?.id) ?? meetings[0]) as T;
     case "active_session": return live as T;

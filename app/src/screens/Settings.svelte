@@ -1,8 +1,9 @@
 <script lang="ts">
   import type { ConfigView } from "../lib/types";
   import settingsIcon from "../assets/settings.png";
+  import CalendarsCard from "./CalendarsCard.svelte";
 
-  let { config }: { config: ConfigView | null } = $props();
+  let { config, notify }: { config: ConfigView | null; notify: (t: string, e?: boolean) => void } = $props();
 </script>
 
 <section class="screen">
@@ -41,6 +42,7 @@
         </dl>
       </div>
     </div>
+    <CalendarsCard {notify} />
     <div class="card files">
       <div><span class="faint">Config file</span> <code>{config.path}</code></div>
       <div><span class="faint">Meetings folder</span> <code>{config.meetings_dir}</code></div>

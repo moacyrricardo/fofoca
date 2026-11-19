@@ -4,13 +4,15 @@
   import mascot from "../assets/mascot.jpg";
   import summaryIcon from "../assets/summary.png";
   import transcriptionIcon from "../assets/transcription.png";
+  import UpNext from "./UpNext.svelte";
 
-  let { meetings, recording, onopen, onstart, onresume }: {
+  let { meetings, recording, onopen, onstart, onresume, onsetup }: {
     meetings: MeetingMeta[];
     recording: boolean;
     onopen: (id: string) => void;
     onstart: (title: string) => void;
     onresume: () => void;
+    onsetup: () => void;
   } = $props();
 
   let title = $state("");
@@ -34,6 +36,7 @@
           <input type="text" placeholder="Meeting title (optional)" bind:value={title} />
           <button class="btn rec" type="submit">● Start recording</button>
         </form>
+        <UpNext onrecord={onstart} {onsetup} disabled={recording} />
       {/if}
     </div>
   </div>

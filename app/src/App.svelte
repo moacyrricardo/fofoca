@@ -158,7 +158,7 @@
 
   <main class="main">
     {#if screen === "meetings"}
-      <Meetings {meetings} {recording} onopen={open} onstart={start} onresume={() => (screen = "live")} />
+      <Meetings {meetings} {recording} onopen={open} onstart={start} onresume={() => (screen = "live")} onsetup={() => (screen = "settings")} />
     {:else if screen === "live"}
       <Live {config} onstart={start} onstop={() => (screen = "processing")} {notify} />
     {:else if screen === "processing"}
@@ -166,7 +166,7 @@
     {:else if screen === "meeting" && openId}
       <MeetingView id={openId} onback={() => go("meetings")} {notify} />
     {:else if screen === "settings"}
-      <Settings {config} />
+      <Settings {config} {notify} />
     {/if}
   </main>
 </div>

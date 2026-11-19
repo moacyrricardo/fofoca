@@ -1,7 +1,9 @@
 //! Tauri shell: exposes fofoca-core to the UI as commands and forwards session events.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use fofoca_core::calendar::{CalendarEvent, CalendarSettings, CalendarSource, Calendars, Keyring};
 use fofoca_core::config::config_path;
 use fofoca_core::model::Meeting;
 use fofoca_core::{Config, MeetingMeta, Session, SessionEvent, Store};
@@ -13,6 +15,17 @@ struct AppState {
     cfg: Config,
     store: Store,
     session: Mutex<Option<Session>>,
+    calendars: Calendars<Keyring>,
+    /// Upcoming events, refreshed at most every CALENDAR_TTL unless forced.
+    upcoming: Mutex<Option<(Instant, Upcoming)>>,
+}
+
+const CALENDAR_TTL: Duration = Duration::from_secs(300);
+
+#[derive(Serialize, Clone)]
+struct Upcoming {
+    events: Vec<CalendarEvent>,
+    errors: Vec<String>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -109,12 +122,57 @@ fn discard_session(state: State<AppState>) -> CmdResult<()> {
     }
 }
 
+#[tauri::command]
+fn calendar_settings(state: State<AppState>) -> CalendarSettings {
+    state.calendars.settings()
+}
+
+/// Validates the link (or .ics path) by fetching and parsing it before storing anything.
+#[tauri::command(async)]
+fn add_calendar(state: State<'_, AppState>, input: String) -> CmdResult<CalendarSource> {
+    let src = state.calendars.add(&input).map_err(err)?;
+    state.upcoming.lock().unwrap().take();
+    Ok(src)
+}
+
+#[tauri::command]
+fn remove_calendar(state: State<AppState>, id: String) -> CmdResult<()> {
+    state.calendars.remove(&id).map_err(err)?;
+    state.upcoming.lock().unwrap().take();
+    Ok(())
+}
+
+#[tauri::command]
+fn set_calendar_filter(state: State<AppState>, only_with_call_link: bool) -> CmdResult<CalendarSettings> {
+    let s = state.calendars.set_only_with_call_link(only_with_call_link).map_err(err)?;
+    state.upcoming.lock().unwrap().take();
+    Ok(s)
+}
+
+/// Events from now (including ones in progress) to 7 days ahead.
+#[tauri::command(async)]
+fn upcoming_events(state: State<'_, AppState>, force: bool) -> Upcoming {
+    if !force {
+        if let Some((at, u)) = state.upcoming.lock().unwrap().as_ref() {
+            if at.elapsed() < CALENDAR_TTL {
+                return u.clone();
+            }
+        }
+    }
+    let now = chrono::Utc::now();
+    let (events, errors) = state.calendars.upcoming(now, now + chrono::Duration::days(7));
+    let u = Upcoming { events, errors };
+    *state.upcoming.lock().unwrap() = Some((Instant::now(), u.clone()));
+    u
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let cfg = Config::load_or_create().expect("loading fo-foca config");
     let store = Store::new(cfg.meetings_dir()).expect("opening meetings folder");
+    let calendars = Calendars::new(fofoca_core::config::calendars_path(), Keyring).expect("calendar client");
     tauri::Builder::default()
-        .manage(AppState { cfg, store, session: Mutex::new(None) })
+        .manage(AppState { cfg, store, session: Mutex::new(None), calendars, upcoming: Mutex::new(None) })
         .setup(|app| {
             // Embedded so the window has the seal icon even when no .desktop entry is installed
             // (X11/XWayland). GNOME on Wayland takes the icon from the desktop entry instead —
@@ -132,7 +190,12 @@ pub fn run() {
             start_session,
             summarize_now,
             stop_session,
-            discard_session
+            discard_session,
+            calendar_settings,
+            add_calendar,
+            remove_calendar,
+            set_calendar_filter,
+            upcoming_events
         ])
         .run(tauri::generate_context!())
         .expect("error while running fo-foca");

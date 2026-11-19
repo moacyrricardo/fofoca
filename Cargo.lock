@@ -1140,6 +1140,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 name = "fofoca"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "fofoca-core",
  "serde",
  "serde_json",

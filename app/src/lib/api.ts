@@ -1,7 +1,7 @@
 // Backend bridge. Inside Tauri it calls the Rust commands; in a plain browser (`npm run dev`
 // without Tauri) it falls back to a scripted fake so the UI can be developed and screenshotted.
 
-import type { ConfigView, Meeting, MeetingMeta, SessionEvent } from "./types";
+import type { CalendarSettings, CalendarSource, ConfigView, Meeting, MeetingMeta, SessionEvent, Upcoming } from "./types";
 import * as fake from "./fake";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -24,6 +24,11 @@ export const api = {
   summarize: () => call<void>("summarize_now"),
   stop: (summarize: boolean) => call<void>("stop_session", { summarize }),
   discard: () => call<void>("discard_session"),
+  calendars: () => call<CalendarSettings>("calendar_settings"),
+  addCalendar: (input: string) => call<CalendarSource>("add_calendar", { input }),
+  removeCalendar: (id: string) => call<void>("remove_calendar", { id }),
+  setCalendarFilter: (onlyWithCallLink: boolean) => call<CalendarSettings>("set_calendar_filter", { onlyWithCallLink }),
+  upcoming: (force = false) => call<Upcoming>("upcoming_events", { force }),
 };
 
 export async function onSession(cb: (e: SessionEvent) => void): Promise<() => void> {

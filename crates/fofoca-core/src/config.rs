@@ -76,6 +76,11 @@ pub fn data_dir() -> PathBuf {
     dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("fofoca")
 }
 
+/// `$XDG_CONFIG_HOME/fofoca/calendars.json` — calendar labels and hosts only; links are in the keyring.
+pub fn calendars_path() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("fofoca/calendars.json")
+}
+
 /// `$XDG_CONFIG_HOME/fofoca/config.toml`.
 pub fn config_path() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("fofoca/config.toml")
