@@ -3,6 +3,7 @@
 //! The desktop app (Tauri) and the `fofoca-cli` binary are thin shells over this crate.
 
 pub mod audio;
+pub mod calendar;
 pub mod capture;
 pub mod config;
 pub mod llm;

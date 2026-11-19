@@ -63,6 +63,9 @@ pub struct MeetingMeta {
     pub duration_s: f64,
     #[serde(default)]
     pub finished: bool,
+    /// Invitees from the calendar event the recording was started from (names for spec 003).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attendees: Vec<String>,
 }
 
 /// A meeting as loaded from disk.

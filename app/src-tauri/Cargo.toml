@@ -15,6 +15,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["image-png"] }
+tauri-plugin-notification = "2"
 serde.workspace = true
 serde_json.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fofoca-core = { path = "../../crates/fofoca-core" }

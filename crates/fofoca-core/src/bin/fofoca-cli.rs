@@ -6,6 +6,7 @@
 //! fofoca-cli record --seconds N [--title T] [--summary-at S] [--no-summary | --discard]
 //! fofoca-cli summarize <meeting-id>         write a final summary for a stored meeting
 //! fofoca-cli list                           list stored meetings
+//! fofoca-cli calendar <list|add LINK|PATH|remove ID|upcoming [DAYS]>
 //! ```
 
 use anyhow::{bail, Context, Result};
@@ -40,6 +41,7 @@ fn run() -> Result<()> {
         Some("transcribe") => transcribe(&cfg, args.get(1).context("usage: transcribe <file.wav>")?),
         Some("record") => record(cfg, store, &args[1..]),
         Some("summarize") => summarize(&cfg, &store, args.get(1).context("usage: summarize <meeting-id>")?),
+        Some("calendar") => calendar(&args[1..]),
         Some("list") => {
             for m in store.list()? {
                 println!("{}  {:>6}  {}{}", m.id, mmss(m.duration_s), m.title, if m.finished { "" } else { "  (unfinished)" });
@@ -90,7 +92,7 @@ fn record(cfg: Config, store: Store, args: &[String]) -> Result<()> {
         SessionEvent::Summary { summary } => println!("--- {:?} summary ({:.1} tok/s) ---\n{}\n---", summary.kind, summary.gen_tokens_per_s, summary.text),
         other => eprintln!("{}", serde_json::to_string(other).unwrap_or_default()),
     });
-    let session = Session::start(cfg, store, &title, sink)?;
+    let session = Session::start(cfg, store, &title, &[], sink)?;
     let t0 = Instant::now();
     let mut asked = false;
     while t0.elapsed() < Duration::from_secs(seconds) {
@@ -127,6 +129,37 @@ fn summarize(cfg: &Config, store: &Store, id: &str) -> Result<()> {
         &Summary { kind: SummaryKind::Final, at_s: meeting.meta.duration_s, text: c.text, model: cfg.llm_name(), gen_tokens_per_s: c.gen_tokens_per_s },
     )?;
     eprintln!("done in {:.1}s ({:.1} tok/s)", t0.elapsed().as_secs_f64(), c.gen_tokens_per_s);
+    Ok(())
+}
+
+fn calendar(args: &[String]) -> Result<()> {
+    use fofoca_core::calendar::{Calendars, Keyring};
+    let cals = Calendars::new(fofoca_core::config::calendars_path(), Keyring)?;
+    match args.first().map(String::as_str) {
+        Some("add") => {
+            let s = cals.add(args.get(1).context("usage: calendar add <link|path>")?)?;
+            println!("added {} ({}, {})", s.label, s.id, s.location);
+        }
+        Some("remove") => cals.remove(args.get(1).context("usage: calendar remove <id>")?)?,
+        Some("upcoming") => {
+            let days: i64 = args.get(1).map(|d| d.parse()).transpose()?.unwrap_or(7);
+            let now = chrono::Utc::now();
+            let (events, errors) = cals.upcoming(now, now + chrono::Duration::days(days));
+            for e in events {
+                println!("{}  {}  [{}]  {}  {}", &e.start[..16], e.title, e.calendar, e.call_link.unwrap_or_default(), e.attendees.join(", "));
+            }
+            for e in errors {
+                eprintln!("error: {e}");
+            }
+        }
+        _ => {
+            let s = cals.settings();
+            for src in &s.sources {
+                println!("{}  {:?}  {}  {}", src.id, src.kind, src.label, src.location);
+            }
+            println!("only events with a call link: {}", s.only_with_call_link);
+        }
+    }
     Ok(())
 }
 
