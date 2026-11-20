@@ -52,6 +52,7 @@ export const api = {
   setMeetingLabels: (id: string, labels: string[]) => call<MeetingMeta>("set_meeting_labels", { id, labels }),
   summarize: () => call<void>("summarize_now"),
   stop: (summarize: boolean) => call<void>("stop_session", { summarize }),
+  stopAndQuit: (meetingId: string) => call<void>("stop_and_quit", { meetingId }),
   discard: () => call<void>("discard_session"),
   pause: () => call<void>("pause_session"),
   resume: () => call<void>("resume_session"),
@@ -69,6 +70,12 @@ export async function onSession(cb: (e: SessionEvent) => void): Promise<() => vo
   if (!inTauri) return fake.onSession(cb);
   const { listen } = await import("@tauri-apps/api/event");
   return listen<SessionEvent>("session", (e) => cb(e.payload));
+}
+
+export async function onQuitRequested(cb: (meetingId: string) => void): Promise<() => void> {
+  if (!inTauri) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<string>("quit-requested", (e) => cb(e.payload));
 }
 
 /** Model download progress (spec 015). */

@@ -26,6 +26,7 @@ export type SessionEvent =
   | { type: "segment"; segment: Segment }
   | { type: "paused"; at_s: number }
   | { type: "resumed"; at_s: number }
+  | { type: "stopping" }
   | { type: "step"; step: "transcribing" | "summarizing" | "saving" }
   | { type: "summary"; summary: Summary }
   | { type: "finished"; meeting: MeetingMeta }

@@ -211,7 +211,9 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       live = null;
       queueMicrotask(() => emit({ type: "discarded", meeting_id: "fake-live" }));
       return undefined as T;
+    case "stop_and_quit":
     case "stop_session":
+      emit({ type: "stopping" });
       timers.forEach(clearTimeout); timers = [];
       emit({ type: "step", step: "transcribing" });
       timers.push(window.setTimeout(() => emit({ type: "step", step: "summarizing" }), 1500));
