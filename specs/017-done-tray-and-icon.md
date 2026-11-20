@@ -1,4 +1,4 @@
-Status: doing
+Status: done
 Branch: moacyrricardo/spec-017-tray-and-icon-build
 
 # 017 — Tray menu, and an icon without white corners
@@ -96,3 +96,13 @@ Branch: moacyrricardo/spec-017-tray-and-icon-build
   added later as a setting.
 - No global keyboard shortcut for start/stop.
 - macOS/Windows tray behaviour (left-click) isn't covered — Linux first.
+
+## Implementation Notes
+
+The Tauri tray and the Record screen share one start operation. It reserves the next recording before a calendar read, so overlapping requests cannot queue a second meeting. Both interfaces receive an immediate `stopping` event when capture ends. While the session saves, the tray disables the recording action and removes Pause. Quit confirmation carries the meeting ID and waits for the session’s finish event.
+
+AppIndicator exposes the status through its panel title. Linux supplies no menu-open click callback, so show, hide, focus and resize events refresh the window label. Other hosts can also refresh it on tray interaction.
+
+The icon generator flood-fills the corner-connected margin, removes the white matte along the tile edge and adds a one-pixel transparent gutter at 32 px. This keeps the smallest bundle sizes clear after Tauri resamples the artwork. All 17 desktop PNGs, all six ICO sizes and all ten ICNS representations have zero alpha at their four corners. The source centre retains its original RGB value of (192, 223, 230).
+
+An isolated GNOME Shell 50.1 session with Ubuntu AppIndicators exercised hidden calendar start, pause, resume, quit cancellation, stop and confirmed save-and-exit. The saved fixture retained its title, attendee, label and series UID. The test used synthetic silence and did not run inference models. Real-call capture and checked notes, installed dock and Alt-Tab icons, light-panel contrast and macOS/Windows desktop behavior still need hand verification.
