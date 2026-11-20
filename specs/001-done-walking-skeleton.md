@@ -1,4 +1,4 @@
-Status: doing
+Status: done
 Branch: moacyrricardo/spec-001-walking-skeleton
 
 # 001 — Walking skeleton: record, transcribe live, summarize on demand
@@ -130,3 +130,34 @@ Commands: `list_meetings`, `get_meeting(id)`, `start_session(title)`, `summarize
 - Shipping whisper.cpp / llama.cpp binaries and downloading models → **006**. Until then the
   config points at locally provided binaries and models.
 - Linux/PipeWire only.
+
+## Implementation Notes
+
+How the build differed from the plan above, and why:
+
+- **VTT instead of `verbose_json`** (Decision 6). On a 30 s pt-BR chunk `verbose_json` took
+  26.1 s vs 17.6 s for `vtt` (+45 %), which breaks the live budget. Live transcription requests
+  `response_format=vtt`; per-word timings are **interpolated** across each segment
+  (`whisper::approx_words`) and stored in the same `Word` shape, so 003/005 can replace them with
+  a precise post-call pass (`verbose_json`, optionally `--dtw large.v3.turbo`).
+- **Silero VAD** (`--vad -vm ggml-silero-v5.1.2.bin`, config `whisper.vad_model`): silent or
+  noise-only chunks return in ~0.8 s instead of ~10 s and no longer produce hallucinated text.
+  An energy gate was tried first and dropped: the mic noise floor (0.003–0.015 RMS) overlaps quiet
+  speech (0.005–0.03).
+- **Chunks end at a quiet point** (`audio::quiet_cut`): the cut is moved within the last 3 s to the
+  quietest moment of both tracks instead of a hard 30 s boundary, so words aren't split across
+  requests ("deu ghost" → "de Augusto" with hard cuts). On the 75 s test file: 68.3 s → 27.4 s
+  end to end (VTT + quiet cut), 28.3 s with VAD.
+- **No summary below 25 words** (`MIN_WORDS_TO_SUMMARIZE`): on near-silence the model invented a
+  whole meeting; partial and final summaries are skipped with a notice instead.
+- **Stop options**: *Stop & summarize*, *Stop, no summary* (keeps transcript + audio) and
+  *Discard* (deletes the meeting folder). Stop acts immediately: capture ends at once and the
+  remaining backlog is transcribed on the "after the call" screen.
+- **Linux icon**: `app.enableGTKAppId: true` in `tauri.conf.json` (exact spelling) sets the GTK app
+  id; GNOME on Wayland still takes the icon from a desktop entry, installed for development by
+  `scripts/install-dev-desktop-entry.sh`.
+- **Tauri bridge** gained `discard_session` and `active_session` (re-attach the UI to a running
+  recording after a reload); `stop_session` takes `summarize: bool`.
+- Calendar (004) and labels (007) shipped on top of this skeleton; see their specs.
+- Verified on the baseline machine: `cargo test -p fofoca-core`, `fofoca-cli transcribe` on the
+  pt-BR reference recording, `fofoca-cli record`, and `cargo tauri dev` end to end.
