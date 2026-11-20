@@ -4,8 +4,6 @@ use anyhow::{bail, Context, Result};
 use std::io::Cursor;
 use std::path::Path;
 
-use crate::model::Track;
-
 pub const SAMPLE_RATE: u32 = 16_000;
 
 /// Root-mean-square level of a block, in 0.0..=1.0.
@@ -15,36 +13,6 @@ pub fn rms(samples: &[i16]) -> f32 {
     }
     let sum: f64 = samples.iter().map(|&s| (s as f64 / i16::MAX as f64).powi(2)).sum();
     (sum / samples.len() as f64).sqrt() as f32
-}
-
-/// Mix two tracks into one, padding the shorter with silence.
-pub fn mix(a: &[i16], b: &[i16]) -> Vec<i16> {
-    let n = a.len().max(b.len());
-    (0..n)
-        .map(|i| {
-            let s = *a.get(i).unwrap_or(&0) as i32 + *b.get(i).unwrap_or(&0) as i32;
-            s.clamp(i16::MIN as i32, i16::MAX as i32) as i16
-        })
-        .collect()
-}
-
-/// Decide whether a time range (seconds, relative to the chunk) was spoken on the mic or the call.
-///
-/// The louder track over the range wins; the mic gets a small handicap because it also picks up
-/// the call from speakers when no headphones are used.
-pub fn attribute(mic: &[i16], sys: &[i16], start_s: f64, end_s: f64) -> Track {
-    let range = |v: &[i16]| {
-        let a = ((start_s.max(0.0) * SAMPLE_RATE as f64) as usize).min(v.len());
-        let b = ((end_s.max(start_s) * SAMPLE_RATE as f64) as usize).clamp(a, v.len());
-        rms(&v[a..b])
-    };
-    if range(mic) >= range(sys) * 1.2 {
-        Track::You
-    } else if range(sys) > 0.0 {
-        Track::Call
-    } else {
-        Track::You
-    }
 }
 
 /// Pick where to end a chunk: the quietest 100 ms frame within the last `search` samples before
@@ -227,26 +195,6 @@ mod tests {
         assert_eq!(rms(&[]), 0.0);
         assert_eq!(rms(&[0; 100]), 0.0);
         assert!((rms(&tone(100, i16::MAX)) - 1.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn mix_pads_and_clamps() {
-        let m = mix(&[i16::MAX, 1, 2], &[10]);
-        assert_eq!(m, vec![i16::MAX, 1, 2]);
-    }
-
-    #[test]
-    fn attribution_follows_the_louder_track() {
-        let sr = SAMPLE_RATE as usize;
-        // mic loud in the first second, call loud in the second
-        let mut mic = tone(sr, 8000);
-        mic.extend(tone(sr, 200));
-        let mut sys = tone(sr, 300);
-        sys.extend(tone(sr, 9000));
-        assert_eq!(attribute(&mic, &sys, 0.0, 1.0), Track::You);
-        assert_eq!(attribute(&mic, &sys, 1.0, 2.0), Track::Call);
-        // out-of-range timestamps don't panic
-        assert_eq!(attribute(&mic, &sys, 5.0, 9.0), Track::You);
     }
 
     #[test]
