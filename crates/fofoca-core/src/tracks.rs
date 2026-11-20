@@ -5,7 +5,6 @@
 //! only repeat the call: without headphones the mic hears the speakers, and Whisper would
 //! transcribe that copy as You.
 
-use crate::audio;
 use crate::model::{Segment, Track, Word};
 use crate::whisper::RawSegment;
 
@@ -14,45 +13,96 @@ const ECHO_OVERLAP: f64 = 0.5;
 /// …and at least this share of its normalised words appear in that call line.
 const ECHO_WORDS: f64 = 0.6;
 
-/// The tracks of a chunk worth a Whisper request, mic first (the order they go to the GPU). A
-/// track without speech costs nothing.
-pub fn with_speech<'a>(mic: &'a [i16], sys: &'a [i16]) -> Vec<(Track, &'a [i16])> {
-    [(Track::You, mic), (Track::Call, sys)].into_iter().filter(|(_, s)| audio::has_speech(s)).collect()
+/// The last `n` characters of `s` (Whisper's prompt is the tail of the transcript).
+pub fn tail_chars(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    s.chars().skip(count.saturating_sub(n)).collect()
 }
 
-/// One chunk, transcribed per track.
-#[derive(Debug, Default)]
-pub struct ChunkLines {
-    /// Both tracks' lines in meeting time, merged by start, echoes dropped.
-    pub segments: Vec<Segment>,
-    /// Mic lines dropped as echoes of the call.
-    pub echoes: usize,
-    /// Tracks whose request failed; the other track's lines are still kept.
-    pub errors: Vec<(Track, anyhow::Error)>,
-}
-
-/// Send each part to `transcribe` (one Whisper request per track, in order), label its lines
-/// with the part's track, move them to meeting time (`offset` = chunk start, s) and merge.
-pub fn transcribe_parts(
-    parts: &[(Track, &[i16])],
-    offset: f64,
-    mut transcribe: impl FnMut(&[i16]) -> anyhow::Result<Vec<RawSegment>>,
-) -> ChunkLines {
-    let (mut mic, mut call, mut errors) = (Vec::new(), Vec::new(), Vec::new());
-    for &(track, samples) in parts {
-        match transcribe(samples) {
-            Ok(raw) => {
-                let lines = raw.into_iter().map(|r| segment(r, track, offset));
-                match track {
-                    Track::You => mic.extend(lines),
-                    Track::Call => call.extend(lines),
-                }
-            }
-            Err(e) => errors.push((track, e)),
+/// Whisper's prompt for audio starting at `start_s` (spec 019, Decision 7): the last 200
+/// characters of the transcript before that moment, from both tracks. `lines` are in start order.
+/// A slice transcribed late (a long call turn) gets the words said before it, not after.
+pub fn prompt_before(lines: &[Segment], start_s: f64) -> String {
+    let mut before = Vec::new();
+    let mut chars = 0;
+    for l in lines.iter().rev().filter(|l| l.start < start_s) {
+        before.push(l.text.as_str());
+        chars += l.text.chars().count() + 1;
+        if chars > 200 {
+            break;
         }
     }
-    let (segments, echoes) = merge(mic, call);
-    ChunkLines { segments, echoes, errors }
+    before.reverse();
+    tail_chars(&before.join(" "), 200)
+}
+
+/// Lines from one request, without mic lines that only repeat a call line already in `known`.
+/// A mic line that starts or ends with such a repeat (your turn glued to an echo, spec 019) loses
+/// just those words: lines are dropped, not whole requests, and your words are kept. Returns the
+/// kept lines and how many were dropped or cut as echoes.
+pub fn drop_echoes(new: Vec<Segment>, known: &[Segment]) -> (Vec<Segment>, usize) {
+    let mut echoes = 0;
+    let mut kept = Vec::with_capacity(new.len());
+    for line in new {
+        if line.track == Track::You && known.iter().any(|c| c.track == Track::Call && is_echo(&line, c)) {
+            echoes += 1;
+        } else if let Some(cut) = (line.track == Track::You).then(|| strip_echo(&line, known)).flatten() {
+            echoes += 1;
+            kept.push(cut);
+        } else {
+            kept.push(line);
+        }
+    }
+    (kept, echoes)
+}
+
+/// Fewer repeated words than this at a line's start or end is chance ("o", "sim", "a gente").
+const ECHO_RUN: usize = 3;
+/// Word times inside a line are interpolated, not measured: allow this much (s) around a call line.
+const ECHO_SLACK: f64 = 1.0;
+
+/// Mic line `m` without the words at its start or end that repeat an overlapping call line, if
+/// there are at least [`ECHO_RUN`] of them and something is left. `None` = nothing to cut, or it
+/// can't be split (then the whole line is kept: losing your words is worse than showing an echo).
+fn strip_echo(m: &Segment, known: &[Segment]) -> Option<Segment> {
+    let calls: Vec<(f64, f64, Vec<String>)> = known
+        .iter()
+        .filter(|c| c.track == Track::Call && c.start < m.end + ECHO_SLACK && m.start < c.end + ECHO_SLACK)
+        .map(|c| (c.start - ECHO_SLACK, c.end + ECHO_SLACK, words(&c.text)))
+        .collect();
+    if calls.is_empty() || m.words.len() <= ECHO_RUN {
+        return None;
+    }
+    let repeats = |w: &Word| {
+        let (mid, said) = ((w.start + w.end) / 2.0, words(&w.text));
+        !said.is_empty() && calls.iter().any(|(a, b, theirs)| mid >= *a && mid <= *b && said.iter().all(|x| theirs.contains(x)))
+    };
+    let n = m.words.len();
+    let front = m.words.iter().take_while(|w| repeats(w)).count();
+    let back = m.words.iter().rev().take_while(|w| repeats(w)).count();
+    let from = if front >= ECHO_RUN { front } else { 0 };
+    let to = if back >= ECHO_RUN { n - back } else { n };
+    if from >= to || (from == 0 && to == n) {
+        return None;
+    }
+    let kept = m.words[from..to].to_vec();
+    Some(Segment {
+        start: kept[0].start,
+        end: kept[kept.len() - 1].end,
+        text: kept.iter().map(|w| w.text.as_str()).collect::<String>().trim().to_string(),
+        words: kept,
+        track: m.track,
+        speaker: m.speaker.clone(),
+    })
+}
+
+/// Put `line` among `lines` (sorted by start) after every line starting at or before it, and
+/// return where it went (spec 019: lines arrive out of order, a long call turn can finish after
+/// your later reply). Equal starts keep their arrival order.
+pub fn insert_by_start(lines: &mut Vec<Segment>, line: Segment) -> usize {
+    let at = lines.partition_point(|l| l.start <= line.start);
+    lines.insert(at, line);
+    at
 }
 
 /// A Whisper line from `track`, moved by `offset` seconds.
@@ -169,73 +219,72 @@ mod tests {
         assert!(!is_echo(&late, &call), "20 % overlap");
     }
 
-    const SR: usize = audio::SAMPLE_RATE as usize;
-
-    /// Voice-like audio (150 ms syllables, 100 ms gaps) between `a` and `b` seconds of `secs`.
-    fn voice(secs: f64, a: f64, b: f64, amp: i16) -> Vec<i16> {
-        let (on, period) = (SR * 15 / 100, SR / 4);
-        (0..(secs * SR as f64) as usize)
-            .map(|i| {
-                let t = i as f64 / SR as f64;
-                if t >= a && t < b && i % period < on { if i % 2 == 0 { amp } else { -amp } } else { 0 }
-            })
-            .collect()
-    }
-
-    /// A stand-in for Whisper: one line over the voiced part of what it was sent.
-    fn fake_whisper(text: &'static str) -> impl Fn(&[i16]) -> Vec<RawSegment> {
-        move |s: &[i16]| {
-            let voiced: Vec<usize> = s.chunks(SR / 20).enumerate().filter(|(_, w)| audio::rms(w) > 0.01).map(|(i, _)| i).collect();
-            let (a, b) = (voiced[0] as f64 / 20.0, (voiced[voiced.len() - 1] + 1) as f64 / 20.0);
-            vec![RawSegment { start: a, end: b, text: text.into(), words: crate::whisper::approx_words(a, b, text) }]
-        }
-    }
-
-    /// The bug that started spec 018 (00:00 of the measured call): the call speaks at 0–2 s, you
-    /// at 2–3 s, and the mixed transcription made one line out of both. The old loudness guess
-    /// over that line (mic ≥ 1.2× call to count as You) labelled your words as Call.
     #[test]
-    fn turn_taking_chunk_keeps_your_words_as_you() {
-        let sys = voice(4.0, 0.0, 2.0, 6000);
-        let mic = voice(4.0, 2.0, 3.0, 6000);
-        // what the removed audio::attribute would have decided for the mixed 0–3 s line
-        let (a, b) = (0, 3 * SR);
-        assert!(audio::rms(&mic[a..b]) < 1.2 * audio::rms(&sys[a..b]), "the old rule said Call for this line");
-
-        let parts = with_speech(&mic, &sys);
-        assert_eq!(parts.iter().map(|p| p.0).collect::<Vec<_>>(), vec![Track::You, Track::Call], "mic first, then call");
-        let (you, call) = (fake_whisper("tudo certo?"), fake_whisper("Oi, como vai?"));
-        let mut sent = Vec::new();
-        let out = transcribe_parts(&parts, 60.0, |s| {
-            sent.push(s.len());
-            Ok(if std::ptr::eq(s, mic.as_slice()) { you(s) } else { call(s) })
-        });
-        assert_eq!(sent.len(), 2);
-        assert!(out.errors.is_empty());
-        let lines: Vec<(Track, &str, f64)> = out.segments.iter().map(|s| (s.track, s.text.as_str(), s.start)).collect();
-        assert_eq!(lines, vec![(Track::Call, "Oi, como vai?", 60.0), (Track::You, "tudo certo?", 62.0)]);
-        assert!(out.segments[1].words.iter().all(|w| w.start >= 62.0), "words move to meeting time too");
+    fn lines_are_inserted_by_start() {
+        let mut lines = vec![line(Track::Call, 0.0, 2.0, "Oi"), line(Track::You, 12.0, 13.0, "Combinado.")];
+        // their long turn finished after your later reply
+        assert_eq!(insert_by_start(&mut lines, line(Track::Call, 3.0, 11.5, "Então, sobre o contrato…")), 1);
+        assert_eq!(insert_by_start(&mut lines, line(Track::You, 12.0, 12.5, "Sim")), 3, "equal starts keep arrival order");
+        assert_eq!(insert_by_start(&mut lines, line(Track::You, 20.0, 21.0, "Tchau")), 4);
+        let order: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(order, vec!["Oi", "Então, sobre o contrato…", "Combinado.", "Sim", "Tchau"]);
     }
 
     #[test]
-    fn silent_track_is_not_sent() {
-        let sys = voice(4.0, 0.0, 3.0, 6000);
-        let quiet_mic: Vec<i16> = (0..4 * SR).map(|i| ((i * 7919) % 301) as i16 - 150).collect();
-        let parts = with_speech(&quiet_mic, &sys);
-        assert_eq!(parts.iter().map(|p| p.0).collect::<Vec<_>>(), vec![Track::Call]);
-        assert!(with_speech(&quiet_mic, &[0; 4 * SR]).is_empty(), "nothing to send at all");
+    fn prompt_is_the_text_before_the_slice() {
+        let lines = vec![line(Track::Call, 0.0, 2.0, "Oi, tudo bem?"), line(Track::You, 3.0, 4.0, "Tudo."), line(Track::Call, 9.0, 12.0, "Depois.")];
+        assert_eq!(prompt_before(&lines, 5.0), "Oi, tudo bem? Tudo.");
+        assert_eq!(prompt_before(&lines, 3.0), "Oi, tudo bem?", "a line starting at the slice is not before it");
+        assert_eq!(prompt_before(&lines, 0.0), "");
+        let long: Vec<Segment> = (0..40).map(|i| line(Track::Call, i as f64, i as f64 + 1.0, "palavra")).collect();
+        let p = prompt_before(&long, 100.0);
+        assert_eq!(p.chars().count(), 200);
+        assert!(p.ends_with("palavra"));
     }
 
     #[test]
-    fn one_failed_track_keeps_the_other() {
-        let (mic, sys) = (voice(2.0, 0.0, 1.0, 6000), voice(2.0, 1.0, 2.0, 6000));
-        let parts = with_speech(&mic, &sys);
-        let call = fake_whisper("oi");
-        let out = transcribe_parts(&parts, 0.0, |s| if std::ptr::eq(s, mic.as_slice()) { anyhow::bail!("timeout") } else { Ok(call(s)) });
-        assert_eq!(out.errors.len(), 1);
-        assert_eq!(out.errors[0].0, Track::You);
-        assert_eq!(out.segments.len(), 1);
-        assert_eq!(out.segments[0].track, Track::Call);
+    fn tail_is_char_safe() {
+        assert_eq!(tail_chars("ação", 2), "ão");
+        assert_eq!(tail_chars("ab", 10), "ab");
+    }
+
+    #[test]
+    fn echoes_of_known_call_lines_are_dropped() {
+        let known = vec![line(Track::Call, 10.0, 13.0, "A gente fecha o relatório na sexta."), line(Track::You, 13.5, 14.0, "Fechado.")];
+        let new = vec![line(Track::You, 10.2, 13.1, "a gente fecha o relatório na sexta"), line(Track::You, 14.5, 16.0, "Mando amanhã.")];
+        let (kept, dropped) = drop_echoes(new, &known);
+        assert_eq!(dropped, 1);
+        assert_eq!(kept.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), vec!["Mando amanhã."]);
+        // call lines are never dropped
+        let call = vec![line(Track::Call, 10.2, 13.1, "a gente fecha o relatório na sexta")];
+        assert_eq!(drop_echoes(call.clone(), &known), (call, 0));
+    }
+
+    fn worded(track: Track, start: f64, end: f64, text: &str) -> Segment {
+        Segment { start, end, text: text.into(), track, words: crate::whisper::approx_words(start, end, text), speaker: None }
+    }
+
+    #[test]
+    fn an_echo_glued_after_your_turn_is_cut_off() {
+        let call = worded(Track::Call, 14.0, 17.0, "Então manda o contrato amanhã cedo.");
+        let glued = worded(Track::You, 9.0, 17.0, "Pode deixar comigo que eu vejo isso hoje então manda o contrato amanhã cedo");
+        assert!(!is_echo(&glued, &call), "not an echo as a whole");
+        let (kept, echoes) = drop_echoes(vec![glued], std::slice::from_ref(&call));
+        assert_eq!((kept.len(), echoes), (1, 1));
+        assert_eq!(kept[0].text, "Pode deixar comigo que eu vejo isso hoje");
+        assert!((kept[0].start - 9.0).abs() < 1e-9 && kept[0].end < 14.0);
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_split_is_kept_whole() {
+        // only two words repeat at the start ("a gente"): could be chance, keep everything
+        let call = worded(Track::Call, 10.0, 12.0, "A gente vê depois.");
+        let mine = worded(Track::You, 10.5, 14.0, "a gente fecha o relatório na sexta");
+        assert_eq!(drop_echoes(vec![mine.clone()], std::slice::from_ref(&call)), (vec![mine], 0));
+        // repeated words in the middle only: no clean cut, keep it
+        let call = worded(Track::Call, 10.0, 14.0, "fecha o relatório");
+        let mine = worded(Track::You, 10.0, 14.0, "eu acho que fecha o relatório sim mas depois");
+        assert_eq!(drop_echoes(vec![mine.clone()], std::slice::from_ref(&call)).1, 0);
     }
 
     #[test]

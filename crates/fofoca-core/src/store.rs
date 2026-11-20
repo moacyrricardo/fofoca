@@ -180,7 +180,7 @@ impl Store {
     pub fn base_transcript(&self, id: &str) -> Result<Vec<Segment>> {
         let base = self.dir(id).join("transcript.base.jsonl");
         if base.exists() {
-            read_jsonl(&base)
+            read_transcript(&base)
         } else {
             self.live_transcript(id)
         }
@@ -190,9 +190,9 @@ impl Store {
     pub fn live_transcript(&self, id: &str) -> Result<Vec<Segment>> {
         let live = self.dir(id).join("transcript.live.jsonl");
         if live.exists() {
-            read_jsonl(&live)
+            read_transcript(&live)
         } else {
-            read_jsonl(&self.dir(id).join("transcript.jsonl"))
+            read_transcript(&self.dir(id).join("transcript.jsonl"))
         }
     }
 
@@ -241,7 +241,7 @@ impl Store {
         let dir = self.dir(id);
         let meta: MeetingMeta = read_json(&dir.join("meta.json"))?;
         let path = dir.join("transcript.jsonl");
-        let segments = if path.exists() { read_jsonl(&path)? } else { Vec::new() };
+        let segments = if path.exists() { read_transcript(&path)? } else { Vec::new() };
         let summaries = read_json(&dir.join("summaries.json")).unwrap_or_default();
         let notes = read_json(&dir.join("notes.json")).ok();
         Ok(Meeting { meta, segments, summaries, speakers: self.speakers(id), notes })
@@ -297,6 +297,14 @@ fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
         }
     }
     Ok(out)
+}
+
+/// A transcript file in start order. Live lines are appended as they arrive (crash-safe), which
+/// isn't start order since spec 019; the sort is stable, so equal starts keep arrival order.
+fn read_transcript(path: &Path) -> Result<Vec<Segment>> {
+    let mut lines: Vec<Segment> = read_jsonl(path)?;
+    lines.sort_by(|a, b| a.start.total_cmp(&b.start));
+    Ok(lines)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -390,6 +398,25 @@ mod tests {
         store.rebuild_transcript(&ro.id, &rebuilt).unwrap();
         assert_eq!(store.base_transcript(&ro.id).unwrap(), rebuilt);
         assert_eq!(store.load(&ro.id).unwrap().segments, rebuilt);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn transcripts_read_back_in_start_order() {
+        let root = std::env::temp_dir().join(format!("fofoca-store-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::new(&root).unwrap();
+        let meta = store.create(&StartInfo::default()).unwrap();
+        let line = |t: f64, track: Track, text: &str| Segment { start: t, end: t + 1.0, text: text.into(), track, words: vec![], speaker: None };
+        // appended as they arrived: your reply first, then their earlier, longer turn
+        for l in [line(0.0, Track::Call, "Oi"), line(12.0, Track::You, "Combinado."), line(3.0, Track::Call, "Sobre o contrato…"), line(12.0, Track::Call, "Isso.")] {
+            store.append_segment(&meta.id, &l).unwrap();
+        }
+        let texts = |v: Vec<Segment>| v.into_iter().map(|s| s.text).collect::<Vec<_>>();
+        let want = vec!["Oi", "Sobre o contrato…", "Combinado.", "Isso."];
+        assert_eq!(texts(store.load(&meta.id).unwrap().segments), want);
+        assert_eq!(texts(store.live_transcript(&meta.id).unwrap()), want);
+        assert_eq!(texts(store.base_transcript(&meta.id).unwrap()), want);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

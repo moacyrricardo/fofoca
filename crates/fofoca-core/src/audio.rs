@@ -92,10 +92,21 @@ pub fn has_speech(track: &[i16]) -> bool {
     if levels.len() < MIN_WINDOWS {
         return false;
     }
-    let mut sorted = levels.clone();
-    sorted.sort_by(|x, y| x.total_cmp(y));
-    let quiet = (sorted[sorted.len() / 10] * 2.0).max(0.006);
+    let quiet = quiet_level(levels.iter().copied());
     levels.iter().filter(|&&l| l > quiet).count() >= MIN_WINDOWS
+}
+
+/// The level at or below which a 50 ms window counts as quiet, given a track's window levels:
+/// twice the noise floor (their 10th percentile), at least 0.006. Shared by [`has_speech`] and
+/// the slicer (spec 019), which keeps a rolling ~30 s of levels per track.
+pub fn quiet_level(levels: impl IntoIterator<Item = f32>) -> f32 {
+    let mut v: Vec<f32> = levels.into_iter().collect();
+    if v.is_empty() {
+        return 0.006;
+    }
+    let k = v.len() / 10;
+    let (_, floor, _) = v.select_nth_unstable_by(k, |x, y| x.total_cmp(y));
+    (*floor * 2.0).max(0.006)
 }
 
 /// Encode samples as an in-memory WAV file (for HTTP upload).

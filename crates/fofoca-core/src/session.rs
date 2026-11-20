@@ -1,14 +1,15 @@
 //! A live recording session (spec 001; layouts, pacing and record-only from spec 015).
 //!
 //! ```text
-//! pw-record mic ─┐                ┌─ mic.wav / system.wav
-//! pw-record sys ─┴─▶ 30 s chunks ─┼─ mic ─▶ whisper-server (GPU) ─▶ You lines  ─┐ merge by time,
-//!                                 └─ sys ─▶ whisper-server (GPU) ─▶ Call lines ─┘ drop mic echoes
-//!                                                    ▲  swap (~3 s)
-//!                        "summary" ─▶ stop whisper ──┴─▶ llama-server (GPU) ─▶ summary ─▶ restart whisper
+//! pw-record mic ─▶ mic.wav + mic slicer ───┐  slices at each track's own pauses (spec 019)
+//! pw-record sys ─▶ system.wav + call slicer ┴─▶ queue ─▶ one worker ─▶ whisper-server (GPU) ─▶ lines
+//!                                                                 ▲  swap (~3 s)
+//!                        "summary" ─▶ stop whisper ───────────────┴─▶ llama-server (GPU) ─▶ summary ─▶ restart whisper
 //! ```
 //!
 //! Each track is transcribed on its own (spec 018), so a line's track is the file it came from.
+//! Each track is cut at its own pauses and silence is never sent (spec 019): one request per
+//! turn, about as many as transcribing the two tracks mixed.
 //!
 //! Capture never stops while models swap: audio piles up in the track buffers (the backlog) and
 //! is transcribed once Whisper is back. Other layouts (spec 015) run Whisper and/or the summary
@@ -31,9 +32,10 @@ use crate::notes;
 use crate::model::{MeetingMeta, Pause, Segment, StartInfo, Summary, SummaryKind, Track};
 use crate::pipeline::{self, StepResult};
 use crate::prompts;
+use crate::queue::{self, SliceQueue, BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S};
 use crate::servers::{Kind, ModelServer};
+use crate::slicer::{Slicer, SlicerConfig};
 use crate::store::Store;
-use crate::tracks;
 use crate::whisper::WhisperClient;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +100,8 @@ struct Shared {
     asr: Mutex<ModelState>,
     llm: Mutex<ModelState>,
     running: AtomicBool,
+    /// Seconds of audio sliced but not transcribed yet: queued, open or held (spec 019).
+    queued_s: Mutex<f64>,
     /// When the current pause began, and the total of earlier pauses — the timer excludes both.
     paused: Mutex<(Option<Instant>, Duration)>,
 }
@@ -124,6 +128,7 @@ impl Session {
             asr: Mutex::new(ModelState::Off),
             llm: Mutex::new(ModelState::Off),
             running: AtomicBool::new(true),
+            queued_s: Mutex::new(0.0),
             paused: Mutex::new((None, Duration::ZERO)),
         });
         let (tx, rx) = mpsc::channel();
@@ -145,7 +150,6 @@ impl Session {
             speakers: Default::default(),
             post_ok: true,
             offset_s: 0.0,
-            pause_checked_at: 0,
             last_summary_at: 0.0,
             aligned: false,
         };
@@ -230,7 +234,8 @@ fn spawn_ticker(
     let started = Instant::now();
     std::thread::spawn(move || {
         while shared.running.load(Ordering::Relaxed) {
-            let backlog = mic.len().min(sys.len()) as f64 / SAMPLE_RATE as f64;
+            // captured but not sliced yet (e.g. during a model swap), plus sliced but not transcribed
+            let backlog = mic.len().min(sys.len()) as f64 / SAMPLE_RATE as f64 + *shared.queued_s.lock().unwrap();
             emit(SessionEvent::Status {
                 elapsed_s: started.elapsed().saturating_sub(shared.paused_for()).as_secs_f64(),
                 paused: shared.is_paused(),
@@ -268,10 +273,8 @@ struct Worker {
     post_ok: bool,
     /// Named voices once speakers are separated (spec 003).
     speakers: std::collections::BTreeMap<String, crate::model::SpeakerInfo>,
-    /// Meeting time (s) at which the next chunk starts.
+    /// Meeting time (s) of the audio taken from the captures so far.
     offset_s: f64,
-    /// Buffer length when we last looked for a pause to cut at (avoid rescanning every 100 ms).
-    pause_checked_at: usize,
     /// Meeting time of the last "summary so far" (for the automatic cadence, spec 015).
     last_summary_at: f64,
     /// The later capture's start was padded so both tracks share t = 0 (spec 018).
@@ -336,12 +339,14 @@ impl Worker {
         if live {
             self.start_asr();
         }
-        let chunk = (pace.chunk_s.max(5) * SAMPLE_RATE) as usize;
         let mut stopping = false;
         let mut final_summary = true;
         let mut pending_summary = false;
         let mut flush = false;
-        let min_chunk = (pace.min_chunk_s * SAMPLE_RATE) as usize;
+        // one slicer per track, one queue, this thread as the only Whisper user (spec 019)
+        let scfg = SlicerConfig::for_config(&self.cfg);
+        let mut slicers = [Slicer::new(Track::You, scfg), Slicer::new(Track::Call, scfg)];
+        let mut queue = SliceQueue::default();
 
         loop {
             while let Ok(cmd) = rx.try_recv() {
@@ -386,21 +391,12 @@ impl Worker {
             if !self.aligned {
                 self.align_tracks();
             }
-            let available = self.mic.buffer.len().min(self.sys.buffer.len());
-            let n = if available >= chunk {
-                let (m, s) = (self.mic.buffer.peek(chunk), self.sys.buffer.peek(chunk));
-                audio::quiet_cut(&m, &s, chunk, 3 * SAMPLE_RATE as usize)
-            } else if stopping || flush {
-                flush = false;
+            // Take what both tracks have, the same amount from each so they stay on one
+            // timeline; everything once capture has stopped or paused.
+            let n = if stopping || flush {
                 self.mic.buffer.len().max(self.sys.buffer.len())
-            } else if min_chunk > 0 && self.asr.is_some() && available >= min_chunk && available >= self.pause_checked_at + SAMPLE_RATE as usize / 2 {
-                // Whisper is idle and there's no backlog: end the chunk at the first natural
-                // pause instead of waiting for a full one (spec 010).
-                self.pause_checked_at = available;
-                let (m, s) = (self.mic.buffer.peek(available), self.sys.buffer.peek(available));
-                audio::pause_cut(&m, &s, min_chunk, chunk).unwrap_or(0)
             } else {
-                0
+                self.mic.buffer.len().min(self.sys.buffer.len())
             };
             if n > 0 {
                 self.aligned = true; // too late to pad once audio has been written
@@ -408,27 +404,46 @@ impl Worker {
                 let s = self.sys.buffer.take(n);
                 mic_wav.append(&m)?;
                 sys_wav.append(&s)?;
-                self.pause_checked_at = 0;
+                let len = m.len().max(s.len());
                 if live {
-                    self.transcribe_chunk(&m, &s);
-                } else {
-                    self.offset_s += m.len().max(s.len()) as f64 / SAMPLE_RATE as f64;
+                    // the call first: a quiet mic slice under call audio without text yet is held
+                    // as a likely echo until that call audio is transcribed (spec 019)
+                    let t = self.offset_s;
+                    queue.call_audio(&s);
+                    queue.call_audio(&vec![0; len - s.len()]); // keep the levels on the timeline
+                    slicers[1].push(t, &s).into_iter().for_each(|x| queue.push(x));
+                    queue.set_call_open(slicers[1].pending_from());
+                    slicers[0].push(t, &m).into_iter().for_each(|x| queue.push(x));
                 }
-                continue; // drain the backlog before anything else
+                self.offset_s += len as f64 / SAMPLE_RATE as f64;
             }
-            if stopping {
-                break;
+            if stopping || flush {
+                // a pause or the end closes every slice: nothing is held across it
+                flush = false;
+                slicers[1].finish().into_iter().for_each(|x| queue.push(x));
+                queue.set_call_open(None);
+                slicers[0].finish().into_iter().for_each(|x| queue.push(x));
             }
-            if let Some(every) = pace.summary_every_s {
+            *self.shared.queued_s.lock().unwrap() = queue.queued_s() + slicers.iter().map(Slicer::pending_s).sum::<f64>();
+            if let Some(every) = pace.summary_every_s.filter(|_| !stopping) {
                 // automatic "summary so far" (spec 015) — only once there's something to summarize
                 if self.offset_s - self.last_summary_at >= every as f64 && self.word_count() >= MIN_WORDS_TO_SUMMARIZE {
                     pending_summary = true;
                 }
             }
-            if pending_summary {
+            if pending_summary && !stopping {
+                // Before the next request, not once the queue is empty: with Whisper near real
+                // time the queue rarely empties, and slices keep queuing meanwhile (spec 019 §2).
                 pending_summary = false;
                 self.last_summary_at = self.offset_s;
                 self.summarize(SummaryKind::Partial);
+                continue;
+            }
+            if live && self.transcribe_next(&mut queue) {
+                continue; // work through the backlog before sleeping
+            }
+            if stopping {
+                break;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -503,40 +518,41 @@ impl Worker {
         }
     }
 
-    /// Spec 018: each track with speech goes to Whisper on its own (mic first, then call, in the
-    /// same slot), so a line's track is the file it came from. Lines are merged by start time and
-    /// mic echoes of the call dropped before they're saved and shown.
-    fn transcribe_chunk(&mut self, mic: &[i16], sys: &[i16]) {
-        let len_s = mic.len().max(sys.len()) as f64 / SAMPLE_RATE as f64;
-        let offset = self.offset_s;
-        self.offset_s += len_s;
-        // Silent tracks aren't sent: Whisper hallucinates on silence and each request costs GPU time.
-        let parts = tracks::with_speech(mic, sys);
-        if parts.is_empty() {
-            return;
-        }
+    /// Send the next request from the queue (spec 019) to Whisper and save and show its lines.
+    /// Returns false when nothing was ready.
+    fn transcribe_next(&mut self, queue: &mut SliceQueue) -> bool {
+        let Some(req) = queue.next(BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S) else { return false };
         if self.asr.is_none() {
             self.start_asr();
         }
-        let Some((_, client)) = &self.asr else { return };
+        let Some((_, client)) = &self.asr else {
+            queue.done(&req); // the error is shown; the audio is kept
+            return true;
+        };
         self.set(Kind::Whisper, ModelState::Busy);
-        // Both requests get the same prompt: the tail of the merged transcript.
-        let prompt = tail_chars(&self.segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" "), 200);
-        let out = tracks::transcribe_parts(&parts, offset, |s| client.transcribe(audio::wav_bytes(s), &self.cfg.language, &prompt));
+        let lang = self.cfg.language.clone();
+        let out = queue::transcribe(&req, &self.segments, |samples, prompt| client.transcribe(audio::wav_bytes(samples), &lang, prompt));
         self.set(Kind::Whisper, ModelState::Ready);
-        for (track, e) in &out.errors {
-            self.error(format!("transcription failed for {:.0}–{:.0} s ({}): {e:#}", offset, offset + len_s, track_name(*track)));
+        queue.done(&req);
+        let (lines, echoes) = match out {
+            Ok(x) => x,
+            Err(e) => {
+                self.error(format!("transcription failed for {:.0}–{:.0} s ({}): {e:#}", req.start_s, req.end_s, track_name(req.track)));
+                return true;
+            }
+        };
+        if echoes > 0 {
+            eprintln!("fofoca: {:.0}–{:.0} s: dropped or cut {echoes} mic line(s) echoing the call", req.start_s, req.end_s);
         }
-        if out.echoes > 0 {
-            eprintln!("fofoca: {:.0}–{:.0} s: dropped {} mic line(s) echoing the call", offset, offset + len_s, out.echoes);
-        }
-        for seg in out.segments {
+        for seg in lines {
             if let Err(e) = self.store.append_segment(&self.meeting.id, &seg) {
                 self.error(format!("saving transcript: {e:#}"));
             }
-            self.segments.push(seg.clone());
+            // placed by start: the summary input reads them in that order (spec 019)
+            crate::tracks::insert_by_start(&mut self.segments, seg.clone());
             (self.emit)(SessionEvent::Segment { segment: seg });
         }
+        true
     }
 
     /// Once both captures have delivered audio, pad the one that started later with that much
@@ -701,20 +717,9 @@ fn track_name(t: Track) -> &'static str {
     }
 }
 
-fn tail_chars(s: &str, n: usize) -> String {
-    let count = s.chars().count();
-    s.chars().skip(count.saturating_sub(n)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tail_is_char_safe() {
-        assert_eq!(tail_chars("ação", 2), "ão");
-        assert_eq!(tail_chars("ab", 10), "ab");
-    }
 
     #[test]
     fn events_serialize_with_type_tag() {
