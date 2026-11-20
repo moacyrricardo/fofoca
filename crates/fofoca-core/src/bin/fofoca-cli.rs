@@ -3,10 +3,10 @@
 //! ```text
 //! fofoca-cli config                         show config path and values
 //! fofoca-cli transcribe <file.wav>          transcribe a 16 kHz mono WAV in chunks
-//! fofoca-cli bench-latency <file.wav> [--mic mic.wav [--mixed]] [--min S] [--ref ref.txt]
+//! fofoca-cli bench-latency <file.wav> [--mic mic.wav [--mixed | --queue [--updates U] [--backlog S] [--merge-gap S] [--min-s S]]] [--min S] [--ref ref.txt]
 //!                                           replay a WAV (or a call + mic pair) in simulated real
-//!                                           time through the live chunker; print per-line
-//!                                           latency, backlog and WER
+//!                                           time through the live chunker (or the slice queue);
+//!                                           print per-line latency, backlog and WER
 //! fofoca-cli record --seconds N [--title T] [--label L]… [--summary-at S] [--no-summary | --discard]
 //! fofoca-cli summarize <meeting-id>         write a final summary for a stored meeting
 //! fofoca-cli diarize <meeting-id>           (re-)run speaker separation on the call track
@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fofoca_core::audio::{self, SAMPLE_RATE};
-use fofoca_core::config::config_path;
+use fofoca_core::config::{config_path, Updates};
 use fofoca_core::llm::LlmClient;
 use fofoca_core::model::{Summary, SummaryKind};
 use fofoca_core::prompts::{self, mmss};
@@ -161,12 +161,26 @@ fn diarize_wav(cfg: &Config, args: &[String]) -> Result<()> {
 /// chunker together; each track with speech gets its own request (as a session does now), or with
 /// `--mixed` one request on the two tracks mixed (as sessions did before, for comparison).
 fn bench_latency(cfg: &Config, args: &[String]) -> Result<()> {
-    const USAGE: &str = "usage: bench-latency <file.wav> [--mic mic.wav [--mixed]] [--min SECONDS] [--ref reference.txt]";
+    const USAGE: &str = "usage: bench-latency <file.wav> [--mic mic.wav [--mixed | --queue [--updates fast|balanced|light] [--backlog S] [--merge-gap S] [--min-s S]]] [--min SECONDS] [--ref reference.txt]";
     let path = args.first().filter(|a| !a.starts_with("--")).context(USAGE)?;
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let min_s: u32 = flag("--min").map(|s| s.parse()).transpose()?.unwrap_or(cfg.min_chunk_seconds);
     let call = audio::read_wav(path.as_ref())?;
     let mic = flag("--mic").map(|m| audio::read_wav(m.as_ref())).transpose()?.unwrap_or_default();
+    if args.iter().any(|a| a == "--queue") {
+        let updates = match flag("--updates").as_deref() {
+            None => cfg.workflow.updates,
+            Some("fast") => Updates::Fast,
+            Some("balanced") => Updates::Balanced,
+            Some("light") => Updates::Light,
+            Some(other) => bail!("unknown --updates {other}; {USAGE}"),
+        };
+        let num = |name: &str, default: f64| -> Result<f64> { Ok(flag(name).map(|s| s.parse()).transpose()?.unwrap_or(default)) };
+        let mut scfg = fofoca_core::slicer::SlicerConfig::live(updates, cfg.chunk_seconds);
+        scfg.min_s = num("--min-s", scfg.min_s)?;
+        let (backlog_s, merge_gap_s) = (num("--backlog", fofoca_core::queue::BACKLOG_S)?, num("--merge-gap", fofoca_core::queue::MERGE_GAP_S)?);
+        return bench_queue(cfg, &call, &mic, (updates, scfg), (backlog_s, merge_gap_s), flag("--ref"));
+    }
     let (two, mixed) = (!mic.is_empty(), args.iter().any(|a| a == "--mixed"));
     let len = call.len().max(mic.len());
     let sr = SAMPLE_RATE as usize;
@@ -253,6 +267,89 @@ fn bench_latency(cfg: &Config, args: &[String]) -> Result<()> {
         eprintln!("chunks: {} both tracks, {} call only, {} mic only, {} silent", kinds[3], kinds[1], kinds[2], kinds[0]);
     }
     if let Some(r) = flag("--ref") {
+        eprintln!("WER {:.1}%", 100.0 * wer(&std::fs::read_to_string(r)?, &text.join(" ")));
+    }
+    Ok(())
+}
+
+/// Spec 019 measurement: both tracks through their slicers and the slice queue under the same
+/// simulated real time as [`bench_latency`] (audio arrives at real speed; each Whisper request
+/// takes as long as it takes). Only counts and timings go to stderr; lines (stdout) carry text.
+fn bench_queue(cfg: &Config, call: &[i16], mic: &[i16], (updates, scfg): (Updates, fofoca_core::slicer::SlicerConfig), (backlog_s, merge_gap_s): (f64, f64), reference: Option<String>) -> Result<()> {
+    use fofoca_core::queue::{self, SliceQueue, MERGE_MAX_S};
+    use fofoca_core::slicer::Slicer;
+    let sr = SAMPLE_RATE as usize;
+    let len = call.len().max(mic.len());
+    let server = ModelServer::start(Kind::Whisper, cfg, cfg.live_devices().0)?;
+    let client = WhisperClient::new(&server.base_url)?;
+    let mut slicers = [Slicer::new(Track::Call, scfg), Slicer::new(Track::You, scfg)];
+    let mut q = SliceQueue::default();
+    let (mut t, mut fed, mut finished) = (0.0f64, 0usize, false);
+    let (mut lines, mut latencies, mut busy, mut echoes) = (Vec::<fofoca_core::Segment>::new(), Vec::new(), 0.0, 0);
+    let (mut max_backlog, mut next_report, mut empty) = (0.0f64, 60.0, [0usize; 2]);
+    let part = |v: &[i16], a: usize, b: usize| v[a.min(v.len())..b.min(v.len())].to_vec();
+    loop {
+        let avail = ((t * sr as f64) as usize).min(len);
+        if avail > fed {
+            let (c, m) = (part(call, fed, avail), part(mic, fed, avail));
+            q.call_audio(&c);
+            let at = fed as f64 / sr as f64;
+            slicers[0].push(at, &c).into_iter().for_each(|s| q.push(s));
+            q.set_call_open(slicers[0].pending_from());
+            slicers[1].push(at, &m).into_iter().for_each(|s| q.push(s));
+            fed = avail;
+        }
+        if fed == len && !finished {
+            finished = true;
+            slicers[0].finish().into_iter().for_each(|s| q.push(s));
+            q.set_call_open(None);
+            slicers[1].finish().into_iter().for_each(|s| q.push(s));
+        }
+        let backlog = q.queued_s() + slicers.iter().map(Slicer::pending_s).sum::<f64>();
+        max_backlog = max_backlog.max(backlog);
+        if t >= next_report {
+            eprintln!("  at {}  backlog {backlog:5.1}s  whisper busy {busy:6.1}s", mmss(t));
+            next_report += 60.0;
+        }
+        let Some(req) = q.next(backlog_s, merge_gap_s, MERGE_MAX_S) else {
+            if finished {
+                break;
+            }
+            t += 0.1;
+            continue;
+        };
+        let t0 = Instant::now();
+        let (new, n) = queue::transcribe(&req, &lines, |x, prompt| client.transcribe(audio::wav_bytes(x), &cfg.language, prompt))?;
+        let took = t0.elapsed().as_secs_f64();
+        q.done(&req);
+        t += took;
+        busy += took;
+        echoes += n;
+        if new.is_empty() && n == 0 {
+            empty[usize::from(req.track == Track::Call)] += 1; // Whisper heard nothing to write
+        }
+        for s in new {
+            let lat = t - s.end;
+            println!("[{}] +{lat:4.1}s {:?} {}", mmss(s.start), s.track, s.text);
+            latencies.push(lat);
+            tracks::insert_by_start(&mut lines, s);
+        }
+    }
+    latencies.sort_by(|a, b| a.total_cmp(b));
+    let pct = |p: f64| latencies.get(((latencies.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or(0.0);
+    let audio_s = len as f64 / sr as f64;
+    let st = q.stats;
+    let per = |tr: Track| lines.iter().filter(|l| l.track == tr).count();
+    eprintln!(
+        "queue {updates:?} (min {}s, max {}s, hold {}s): {} requests, whisper busy {busy:.1}s for {audio_s:.1}s of audio ({:.2}x real time); {} lines ({} You / {} Call), latency median {:.1}s, p90 {:.1}s, max {:.1}s; max backlog {max_backlog:.1}s; done {:.1}s after the audio ended",
+        scfg.min_s, scfg.max_s, scfg.hold_s, st.requests, busy / audio_s, lines.len(), per(Track::You), per(Track::Call), pct(0.5), pct(0.9), pct(1.0), t - audio_s
+    );
+    eprintln!(
+        "backlog_s {backlog_s}, merge_gap_s {merge_gap_s}; slices: {} mic, {} call; {} merged requests; {} requests with no lines ({} mic, {} call); {} mic slices held as echo; {echoes} mic lines dropped or cut as echo",
+        st.you_slices, st.call_slices, st.merged, empty[0] + empty[1], empty[0], empty[1], st.held_echo
+    );
+    if let Some(r) = reference {
+        let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         eprintln!("WER {:.1}%", 100.0 * wer(&std::fs::read_to_string(r)?, &text.join(" ")));
     }
     Ok(())
