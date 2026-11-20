@@ -16,4 +16,4 @@
 | 012 | done   | import-recording            | moacyrricardo/spec-012-import-recording  | —     | uses the 003 post-call pipeline; feeds 008 |
 | 013 | done   | servers-die-with-app        | moacyrricardo/spec-013-servers-die-with-app | —  | found while measuring 005 |
 | 014 | done   | replay                      | moacyrricardo/spec-014-replay           | —     | mock in 014-assets; needs audio kept (011) |
-| 015 | doing  | models-workflow             | moacyrricardo/spec-015-models-workflow  | —     | mock in 015-assets; global settings, tabs |
+| 015 | done   | models-workflow             | moacyrricardo/spec-015-models-workflow  | —     | mock in 015-assets; global settings, tabs |

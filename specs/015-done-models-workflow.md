@@ -1,3 +1,6 @@
+Status: done
+Branch: moacyrricardo/spec-015-models-workflow
+
 # 015 — Models & workflow: choose the models and what runs where
 
 > **Design reference:** [`015-assets/models-workflow-mock.html`](015-assets/models-workflow-mock.html) —
@@ -110,3 +113,34 @@ move into Storage.
   benchmark should replace them.
 - No per-recording choice (by decision).
 - Engines can't be downloaded yet (006).
+
+## Implementation Notes
+
+- Built as specified, with these differences:
+  - **Live summary needs the live transcript** (decided here): turning the transcript off turns
+    the summary off and disables it, instead of transcribing silently in the background.
+  - `[workflow].live_device` was added: where the transcript runs when it's the only live task.
+  - **The summary model stays loaded between summaries** in every layout that doesn't swap.
+    Measured while building: llama-server on the CPU took **57 s** to load Qwen3.5-2B from this
+    disk (cold), so restarting it for every automatic summary wasn't viable. Whisper on the CPU
+    loaded in ~5 s. Qwen3.5-2B on the CPU wrote at **10.9 tokens/s** (earlier: 11–13).
+  - "Both loaded on the GPU at once" is a real layout (`gpu_both`), selectable when the two
+    footprints fit in 95 % of the GPU, or when a footprint is unknown.
+  - The suggested layout comes from the GPU probe + footprints only; speed benchmarking stays
+    in 002.
+  - Models tab: a menu per task lists the suggested models (with "· N MB to download" when
+    missing); "Use another…" picks your own file (two files in a row for Speakers). Downloads
+    are checked by exact size (no sha256 — 006 may add it).
+  - CPU flags: whisper `-ng` (log: `use gpu = 0`, model in CPU memory); llama `-dev none -ngl 0`
+    (no Vulkan buffers). Both checked by hand against the real binaries.
+- **Tests**: Rust — workflow defaults/pace/save (older config files read as today's behaviour),
+  live-summary rule and devices, `--list-devices` parsing, footprints and suggestion, catalog
+  presence/current entry, downloader against a local HTTP server (size check, cancel, no partial
+  file left). TS (`npm test`, 9) — GPU memory peak per layout, availability rules, banner titles,
+  after-call steps. The browser preview was driven headlessly through every tab, the layouts,
+  Live updates, record-only, notes off, a fake download and the Record screen.
+- **Not verified yet** (needs `cargo tauri dev` and a real call): each layout during a real
+  recording, record-only transcription after stop, an automatic summary every 5 min, a real
+  download through the app, and the GPU probe inside the app.
+- Known gap added: `processed` with steps turned off has no dedicated test (the rule is "every
+  enabled step succeeded").
