@@ -53,9 +53,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     with Image.open(args.artwork) as source:
         tile = transparent_tile(source)
-        # A half-pixel gutter at 32px prevents resize ringing in bundle corners.
+        # A one-pixel gutter at 32px prevents resize ringing in bundle corners.
         if "A" not in source.getbands() or source.getchannel("A").getextrema()[0] == 255:
-            tile = ImageOps.expand(tile, border=max(1, round(tile.width / 64)))
+            tile = ImageOps.expand(tile, border=max(1, round(tile.width / 32)))
     tile.save(TAURI / "app-icon.png")
     idle, recording = tray_images(tile)
     idle.save(TAURI / "icons/tray-idle.png")
