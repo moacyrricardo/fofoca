@@ -19,4 +19,4 @@
 | 015 | done   | models-workflow             | moacyrricardo/spec-015-models-workflow  | —     | mock in 015-assets; global settings, tabs |
 | 016 | done   | tasks-view                  | moacyrricardo/spec-016-tasks-view       | —     | filtered by meeting labels; no per-task labels |
 | 017 | done   | tray-and-icon               | moacyrricardo/spec-017-tray-and-icon-build | —     | icon without white corners; tray start/stop + show/hide |
-| 018 | todo   | per-track-transcription     | —                                        | —     | mic and call transcribed separately; replaces mix + loudness guess |
+| 018 | doing  | per-track-transcription     | moacyrricardo/spec-018-per-track-transcription | —     | mic and call transcribed separately; replaces mix + loudness guess |

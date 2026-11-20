@@ -1,5 +1,5 @@
-Status: todo
-Branch: —
+Status: doing
+Branch: moacyrricardo/spec-018-per-track-transcription
 
 # 018 — Transcribe the mic and call tracks separately
 
