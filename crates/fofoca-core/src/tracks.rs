@@ -19,6 +19,23 @@ pub fn tail_chars(s: &str, n: usize) -> String {
     s.chars().skip(count.saturating_sub(n)).collect()
 }
 
+/// Whisper's prompt for audio starting at `start_s` (spec 019, Decision 7): the last 200
+/// characters of the transcript before that moment, from both tracks. `lines` are in start order.
+/// A slice transcribed late (a long call turn) gets the words said before it, not after.
+pub fn prompt_before(lines: &[Segment], start_s: f64) -> String {
+    let mut before = Vec::new();
+    let mut chars = 0;
+    for l in lines.iter().rev().filter(|l| l.start < start_s) {
+        before.push(l.text.as_str());
+        chars += l.text.chars().count() + 1;
+        if chars > 200 {
+            break;
+        }
+    }
+    before.reverse();
+    tail_chars(&before.join(" "), 200)
+}
+
 /// Lines from one request, without mic lines that only repeat a call line already in `known`.
 /// A mic line that starts or ends with such a repeat (your turn glued to an echo, spec 019) loses
 /// just those words: lines are dropped, not whole requests, and your words are kept. Returns the
@@ -211,6 +228,18 @@ mod tests {
         assert_eq!(insert_by_start(&mut lines, line(Track::You, 20.0, 21.0, "Tchau")), 4);
         let order: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(order, vec!["Oi", "Então, sobre o contrato…", "Combinado.", "Sim", "Tchau"]);
+    }
+
+    #[test]
+    fn prompt_is_the_text_before_the_slice() {
+        let lines = vec![line(Track::Call, 0.0, 2.0, "Oi, tudo bem?"), line(Track::You, 3.0, 4.0, "Tudo."), line(Track::Call, 9.0, 12.0, "Depois.")];
+        assert_eq!(prompt_before(&lines, 5.0), "Oi, tudo bem? Tudo.");
+        assert_eq!(prompt_before(&lines, 3.0), "Oi, tudo bem?", "a line starting at the slice is not before it");
+        assert_eq!(prompt_before(&lines, 0.0), "");
+        let long: Vec<Segment> = (0..40).map(|i| line(Track::Call, i as f64, i as f64 + 1.0, "palavra")).collect();
+        let p = prompt_before(&long, 100.0);
+        assert_eq!(p.chars().count(), 200);
+        assert!(p.ends_with("palavra"));
     }
 
     #[test]

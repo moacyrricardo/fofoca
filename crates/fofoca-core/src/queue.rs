@@ -203,7 +203,8 @@ impl SliceQueue {
     }
 }
 
-/// Send one request to `transcribe` (given the samples and the prompt) and return its lines in
+/// Send one request to `transcribe` (given the samples and the prompt: the transcript just before
+/// the request's start, `tracks::prompt_before`) and return its lines in
 /// meeting time, without mic lines (or the ends of mic lines) that only repeat the call lines
 /// already in `lines`.
 pub fn transcribe(
@@ -211,7 +212,7 @@ pub fn transcribe(
     lines: &[Segment],
     transcribe: impl FnOnce(&[i16], &str) -> anyhow::Result<Vec<RawSegment>>,
 ) -> anyhow::Result<(Vec<Segment>, usize)> {
-    let prompt = tracks::tail_chars(&lines.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" "), 200);
+    let prompt = tracks::prompt_before(lines, req.start_s);
     let new = req.lines(transcribe(&req.samples, &prompt)?);
     Ok(tracks::drop_echoes(new, lines))
 }
@@ -316,8 +317,9 @@ mod tests {
         q.push(slice(Track::Call, 106.5, 110.0));
         let req = q.next(ALWAYS_MERGE, MERGE_GAP_S, MERGE_MAX_S).unwrap();
         assert_eq!(req.slices, 2);
-        let (lines, echoes) = transcribe(&req, &[], |s, prompt| {
-            assert_eq!(prompt, "");
+        let before = vec![Segment { start: 90.0, end: 95.0, text: "Antes.".into(), track: Track::You, words: vec![], speaker: None }, Segment { start: 120.0, end: 121.0, text: "Depois.".into(), track: Track::You, words: vec![], speaker: None }];
+        let (lines, echoes) = transcribe(&req, &before, |s, prompt| {
+            assert_eq!(prompt, "Antes.", "only what was said before the request");
             Ok(fake_whisper(s, &["Primeira parte.", "Segunda parte."]))
         })
         .unwrap();
