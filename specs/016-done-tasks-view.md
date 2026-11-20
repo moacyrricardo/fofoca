@@ -1,3 +1,6 @@
+Status: done
+Branch: moacyrricardo/spec-016-tasks-view
+
 # 016 — Tasks: every meeting's next steps in one list
 
 ## Context
@@ -38,3 +41,15 @@ To see "what did I agree to this week" you open every meeting. Meetings already 
 - No done state: a task stays listed after it's done (by decision for now).
 - Due dates are whatever the notes extracted (`YYYY-MM-DD`); relative dates the model couldn't
   resolve stay empty.
+
+## Implementation Notes
+
+- Built as specified. Label counts are per meeting (as in the Meetings list), not per task.
+- `MeetingView` gained `initialTab` and `backLabel`; App remembers where a meeting was opened
+  from, so "back" returns to Tasks and the sidebar keeps Tasks highlighted.
+- Browser preview: `#alltasks` opens the screen (`#tasks` already opens a meeting's Tasks tab);
+  the sample data has four tasks across two meetings, one overdue and one without a date.
+- **Tests**: Rust `tasks_come_with_their_meeting_and_skip_meetings_without_notes`; TS (3) — label
+  filter (all selected labels, counts per meeting), grouping order, due order and overdue.
+  The preview was driven headlessly: filter, both orders, opening a task, back.
+- **Not verified yet**: with real meetings in `cargo tauri dev`.
