@@ -82,7 +82,7 @@ impl SlicerConfig {
     /// After the call (and imports): no latency to protect, so no holding; the queue merges short
     /// slices into their neighbours instead (§6).
     pub fn rebuild() -> Self {
-        SlicerConfig { min_s: 6.0, max_s: 28.0, hold_s: 0.0, pause_ms: 350 }
+        SlicerConfig { min_s: 6.0, max_s: crate::queue::MERGE_MAX_S, hold_s: 0.0, pause_ms: 350 }
     }
 }
 
