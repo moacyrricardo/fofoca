@@ -3,7 +3,7 @@
   import { api } from "../lib/api";
   import type { CalendarEvent } from "../lib/types";
 
-  let { onrecord, onsetup, disabled }: { onrecord: (title: string, attendees: string[]) => void; onsetup: () => void; disabled: boolean } = $props();
+  let { onrecord, onsetup, disabled }: { onrecord: (title: string, attendees: string[], labels: string[]) => void; onsetup: () => void; disabled: boolean } = $props();
 
   let events = $state<CalendarEvent[] | null>(null);
   let hasCalendars = $state(true);
@@ -67,7 +67,7 @@
           <b>{e.title}</b>
           <div class="faint small">{[service(e.call_link), e.attendees.slice(0, 3).join(", ") + (e.attendees.length > 3 ? ` +${e.attendees.length - 3}` : "")].filter(Boolean).join(" · ")}</div>
         </div>
-        <button class="btn sm" class:rec={i === 0} class:ghost={i > 0} onclick={() => onrecord(e.title, e.attendees)} {disabled}>● Record this</button>
+        <button class="btn sm" class:rec={i === 0} class:ghost={i > 0} onclick={() => onrecord(e.title, e.attendees, e.labels ?? [])} {disabled}>● Record this</button>
       </div>
     {/each}
   </div>

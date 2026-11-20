@@ -49,3 +49,18 @@ export function markdown(src: string): string {
   if (list) out.push("</ul>");
   return out.join("");
 }
+
+/** Mirrors fofoca-core `labels::normalize`: trimmed, lower-case, whitespace → "-", ≤ 32 chars. */
+export function normalizeLabel(s: string): string | null {
+  const n = [...s.trim().split(/\s+/).join("-").toLowerCase()].slice(0, 32).join("").replace(/-+$/, "");
+  return n || null;
+}
+
+export function normalizeLabels(labels: string[]): string[] {
+  const out: string[] = [];
+  for (const l of labels) {
+    const n = normalizeLabel(l);
+    if (n && !out.includes(n)) out.push(n);
+  }
+  return out;
+}

@@ -4,6 +4,7 @@
   import type { Meeting } from "../lib/types";
   import summaryIcon from "../assets/summary.png";
   import transcriptionIcon from "../assets/transcription.png";
+  import LabelEditor from "./LabelEditor.svelte";
 
   let { id, onback, notify }: { id: string; onback: () => void; notify: (t: string, e?: boolean) => void } = $props();
 
@@ -20,6 +21,19 @@
       }
     }).catch((e) => notify(String(e), true));
   });
+
+  async function saveLabels(labels: string[]) {
+    if (!meeting) return;
+    const m = meeting;
+    const before = m.meta.labels ?? [];
+    m.meta.labels = labels; // optimistic
+    try {
+      m.meta = await api.setMeetingLabels(m.meta.id, labels);
+    } catch (e) {
+      m.meta.labels = before;
+      notify(String(e), true);
+    }
+  }
 
   const final = $derived(meeting?.summaries.filter((s) => s.kind === "final").at(-1));
   const partials = $derived(meeting?.summaries.filter((s) => s.kind === "partial") ?? []);
@@ -38,6 +52,7 @@
     {#if meeting.meta.attendees?.length}
       <div class="faint small">Invited: {meeting.meta.attendees.join(", ")}</div>
     {/if}
+    <div class="mlabels"><LabelEditor labels={meeting.meta.labels ?? []} onchange={saveLabels} /></div>
 
     <div class="tabs">
       <button class="tab" class:on={tab === "summary"} onclick={() => (tab = "summary")}><img src={summaryIcon} alt="" />Summary</button>
@@ -80,6 +95,7 @@
   .back { background: none; border: 0; color: var(--ink-3); cursor: pointer; padding: 0; margin-bottom: 10px; font-weight: 700; }
   .back:hover { color: var(--ink); }
   .small { font-size: 13px; }
+  .mlabels { margin-top: 10px; }
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 18px 0 16px; }
   .tab { background: none; border: 0; color: var(--ink-2); font-weight: 800; font-size: 14px; padding: 9px 14px; border-bottom: 3px solid transparent; cursor: pointer; display: flex; gap: 7px; align-items: center; }
   .tab.on { color: var(--ink); border-bottom-color: var(--coral); }

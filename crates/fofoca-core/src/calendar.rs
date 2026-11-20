@@ -27,6 +27,9 @@ pub struct CalendarEvent {
     pub attendees: Vec<String>,
     /// Label of the calendar it came from.
     pub calendar: String,
+    /// The calendar's default labels, applied when recording this event (spec 007).
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 // ---------------------------------------------------------------- parsing
@@ -246,6 +249,7 @@ pub fn events_between(text: &str, calendar: &str, from: DateTime<Utc>, to: DateT
                 call_link: link.clone(),
                 attendees: people.clone(),
                 calendar: calendar.to_string(),
+                labels: Vec::new(),
             });
         }
     }
@@ -293,6 +297,9 @@ pub struct CalendarSource {
     pub label: String,
     /// Host for links (`calendar.google.com`) or the file path — never the secret.
     pub location: String,
+    /// Labels given to meetings recorded from this calendar's events (spec 007).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_labels: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -429,7 +436,7 @@ impl<S: SecretStore> Calendars<S> {
         if kind == SourceKind::Link {
             self.secrets.set(&id, &normalize_url(input))?;
         }
-        let source = CalendarSource { id, kind, label, location };
+        let source = CalendarSource { id, kind, label, location, default_labels: Vec::new() };
         s.sources.push(source.clone());
         self.save(&s)?;
         Ok(source)
@@ -445,6 +452,17 @@ impl<S: SecretStore> Calendars<S> {
             };
             same.then_some(x.id)
         })
+    }
+
+    /// Set the labels applied to meetings recorded from this calendar's events.
+    pub fn set_default_labels<L: AsRef<str>>(&self, id: &str, labels: &[L]) -> Result<CalendarSettings> {
+        let labels = crate::labels::normalize_all(labels);
+        let _w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.settings();
+        let src = s.sources.iter_mut().find(|x| x.id == id).with_context(|| format!("no calendar with id {id}"))?;
+        src.default_labels = labels;
+        self.save(&s)?;
+        Ok(s)
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {
@@ -471,7 +489,10 @@ impl<S: SecretStore> Calendars<S> {
                 SourceKind::File => std::fs::read_to_string(&src.location).map_err(Into::into),
             };
             match text {
-                Ok(t) => events.extend(events_between(&t, &src.label, from, to)),
+                Ok(t) => events.extend(events_between(&t, &src.label, from, to).into_iter().map(|mut e| {
+                    e.labels = src.default_labels.clone();
+                    e
+                })),
                 Err(e) => errors.push(format!("{}: {}", src.label, redact(&format!("{e:#}")))),
             }
         }
@@ -634,6 +655,11 @@ END:VCALENDAR\r\n";
         assert!(errs.is_empty());
         let labels: HashSet<_> = ev.iter().map(|e| e.calendar.as_str()).collect();
         assert_eq!(labels, HashSet::from(["Trabalho", "Pessoal"]));
+        cals.set_default_labels(&sb.id, &["Pessoal", "família"]).unwrap();
+        assert!(cals.set_default_labels("nope", &["x"]).is_err());
+        let (ev, _) = cals.upcoming(utc("2026-11-19T00:00:00Z"), utc("2026-11-24T00:00:00Z"));
+        assert!(ev.iter().filter(|e| e.calendar == "Pessoal").all(|e| e.labels == ["pessoal", "família"]));
+        assert!(ev.iter().filter(|e| e.calendar == "Trabalho").all(|e| e.labels.is_empty()));
         cals.remove(&sa.id).unwrap();
         assert_eq!(cals.settings().sources.iter().map(|s| &s.id).collect::<Vec<_>>(), vec![&sb.id]);
         std::fs::remove_dir_all(&dir).unwrap();

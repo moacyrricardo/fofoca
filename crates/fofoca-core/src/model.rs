@@ -66,6 +66,9 @@ pub struct MeetingMeta {
     /// Invitees from the calendar event the recording was started from (names for spec 003).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attendees: Vec<String>,
+    /// Normalized labels (spec 007), see [`crate::labels::normalize`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 /// A meeting as loaded from disk.
