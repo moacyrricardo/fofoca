@@ -60,6 +60,7 @@ impl Store {
             attendees: info.attendees.clone(),
             labels: labels::normalize_all(&info.labels),
             calendar_uid: info.calendar_uid.clone().filter(|u| !u.is_empty()),
+            pauses: Vec::new(),
         };
         self.save_meta(&meta)?;
         Ok(meta)

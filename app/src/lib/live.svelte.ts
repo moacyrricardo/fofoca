@@ -6,6 +6,8 @@ import type { MeetingMeta, Segment, Status, Summary } from "./types";
 export const live = $state({
   meeting: null as MeetingMeta | null,
   segments: [] as Segment[],
+  /** Meeting times (s) where the recording was paused. */
+  pauses: [] as number[],
   partial: null as Summary | null,
   final: null as Summary | null,
   status: null as Status | null,
@@ -17,6 +19,7 @@ export const live = $state({
 export function resetLive(meeting: MeetingMeta | null) {
   live.meeting = meeting;
   live.segments = [];
+  live.pauses = [];
   live.partial = null;
   live.final = null;
   live.status = null;

@@ -64,3 +64,11 @@ export function normalizeLabels(labels: string[]): string[] {
   }
   return out;
 }
+
+/** Pause markers (meeting times) to show before transcript line `i`; `i = segs.length` → after
+ *  the last line. A pause sits before the first line that starts at or after it. */
+export function pausesBefore(pauses: number[], segs: { start: number }[], i: number): number[] {
+  const lo = i === 0 ? -Infinity : segs[i - 1].start;
+  const hi = i < segs.length ? segs[i].start : Infinity;
+  return pauses.filter((p) => p > lo && p <= hi);
+}

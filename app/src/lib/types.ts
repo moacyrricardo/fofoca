@@ -6,17 +6,20 @@ export type ModelState = "off" | "loading" | "ready" | "busy";
 export interface Word { start: number; end: number; text: string; p: number }
 export interface Segment { start: number; end: number; text: string; track: Track; words: Word[] }
 export interface Summary { kind: "partial" | "final"; at_s: number; text: string; model: string; gen_tokens_per_s: number }
-export interface MeetingMeta { id: string; title: string; started_at: string; duration_s: number; finished: boolean; attendees?: string[]; labels?: string[]; calendar_uid?: string }
+export interface MeetingMeta { id: string; title: string; started_at: string; duration_s: number; finished: boolean; attendees?: string[]; labels?: string[]; calendar_uid?: string; pauses?: Pause[] }
+export interface Pause { at_s: number; from: string; to: string | null }
 export interface Meeting { meta: MeetingMeta; segments: Segment[]; summaries: Summary[] }
 
 export interface Status {
-  elapsed_s: number; backlog_s: number; mic_level: number; call_level: number; asr: ModelState; llm: ModelState;
+  elapsed_s: number; backlog_s: number; mic_level: number; call_level: number; asr: ModelState; llm: ModelState; paused?: boolean;
 }
 
 export type SessionEvent =
   | { type: "started"; meeting: MeetingMeta }
   | ({ type: "status" } & Status)
   | { type: "segment"; segment: Segment }
+  | { type: "paused"; at_s: number }
+  | { type: "resumed"; at_s: number }
   | { type: "step"; step: "transcribing" | "summarizing" | "saving" }
   | { type: "summary"; summary: Summary }
   | { type: "finished"; meeting: MeetingMeta }
@@ -41,6 +44,7 @@ export interface ConfigView {
   config: {
     language: string;
     chunk_seconds: number;
+    min_chunk_seconds?: number;
     whisper: { server: string; model: string; device: number; threads: number; vad_model: string | null };
     llm: { server: string; model: string; device: string; context: number; threads: number };
   };

@@ -73,6 +73,42 @@ pub fn quiet_cut(a: &[i16], b: &[i16], target: usize, search: usize) -> usize {
     best.0
 }
 
+/// Find a natural pause to end a chunk early (spec 010): the first run of ≥ 350 ms of relative
+/// quiet that starts at or after `min` samples, searching up to `max`. Returns the cut index (the
+/// middle of the quiet run) or `None` if nobody paused yet.
+///
+/// "Quiet" is relative to this buffer: twice its noise floor (10th percentile of 50 ms window
+/// levels), at least 0.006, at most 30 % of the median level. An absolute threshold doesn't work:
+/// mic noise (0.003–0.015 RMS) overlaps quiet speech.
+pub fn pause_cut(a: &[i16], b: &[i16], min: usize, max: usize) -> Option<usize> {
+    const WIN: usize = (SAMPLE_RATE / 20) as usize; // 50 ms
+    const RUN: usize = 7; // 350 ms
+    let len = a.len().max(b.len()).min(max);
+    if len < min + WIN * RUN {
+        return None;
+    }
+    let level = |i: usize| {
+        let seg = |v: &[i16]| rms(&v[(i * WIN).min(v.len())..((i + 1) * WIN).min(v.len())]);
+        seg(a).max(seg(b))
+    };
+    let levels: Vec<f32> = (0..len / WIN).map(level).collect();
+    let mut sorted = levels.clone();
+    sorted.sort_by(|x, y| x.total_cmp(y));
+    let floor = sorted[sorted.len() / 10];
+    let median = sorted[sorted.len() / 2];
+    // Mostly-speech buffers have a speech-level 10th percentile; never call speech "quiet".
+    let quiet = (floor * 2.0).max(0.006).min(median * 0.3);
+    let mut run = 0;
+    for (i, &l) in levels.iter().enumerate().skip(min.div_ceil(WIN)) {
+        run = if l < quiet { run + 1 } else { 0 };
+        if run >= RUN {
+            let run_start = (i + 1 - run) * WIN;
+            return Some(run_start + run * WIN / 2);
+        }
+    }
+    None
+}
+
 /// Encode samples as an in-memory WAV file (for HTTP upload).
 pub fn wav_bytes(samples: &[i16]) -> Vec<u8> {
     let mut buf = Cursor::new(Vec::with_capacity(44 + samples.len() * 2));
@@ -204,6 +240,27 @@ mod tests {
         assert!(cut >= 85 * sr / 10 && cut <= 88 * sr / 10, "cut at {cut}");
         // shorter than the target: take everything
         assert_eq!(quiet_cut(&a[..sr], &[], 9 * sr, 3 * sr), sr);
+    }
+
+    #[test]
+    fn pause_cut_waits_for_a_real_pause() {
+        let sr = SAMPLE_RATE as usize;
+        let noise = |n: usize| -> Vec<i16> { (0..n).map(|i| ((i * 7919) % 200) as i16 - 100).collect() };
+        // speech 0–5 s, short 0.2 s gap at 5 s (not a pause), speech to 14 s, 0.6 s pause, speech to 20 s
+        let mut a = tone(20 * sr, 6000);
+        a[5 * sr..5 * sr + sr / 5].copy_from_slice(&noise(sr / 5));
+        a[14 * sr..14 * sr + 6 * sr / 10].copy_from_slice(&noise(6 * sr / 10));
+        let cut = pause_cut(&a, &[], 3 * sr, 30 * sr).expect("finds the 0.6 s pause");
+        assert!(cut > 14 * sr && cut < 14 * sr + 6 * sr / 10, "cut at {cut}");
+        // a pause before `min` doesn't count
+        assert_eq!(pause_cut(&a, &[], 15 * sr, 30 * sr), None);
+        // continuous speech: no cut
+        assert_eq!(pause_cut(&tone(20 * sr, 6000), &[], 3 * sr, 30 * sr), None);
+        // the other track talking through the mic's pause means nobody paused
+        let b = tone(20 * sr, 6000);
+        assert_eq!(pause_cut(&a, &b, 3 * sr, 30 * sr), None);
+        // a buffer that is too short
+        assert_eq!(pause_cut(&a[..3 * sr], &[], 3 * sr, 30 * sr), None);
     }
 
     #[test]

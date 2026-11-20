@@ -37,7 +37,7 @@ const config: ConfigView = {
   whisper_model: "ggml-large-v3-turbo-q5_0",
   llm_model: "Qwen3.5-2B-Q4_K_M",
   config: {
-    language: "pt", chunk_seconds: 30,
+    language: "pt", chunk_seconds: 30, min_chunk_seconds: 8,
     whisper: { server: "~/.local/share/fofoca/bin/whisper/whisper-server", model: "~/.local/share/fofoca/models/ggml-large-v3-turbo-q5_0.bin", device: 0, threads: 4, vad_model: "~/.local/share/fofoca/models/ggml-silero-v5.1.2.bin" },
     llm: { server: "llama-server", model: "Qwen3.5-2B-Q4_K_M.gguf", device: "Vulkan1", context: 32768, threads: 4 },
   },
@@ -104,6 +104,19 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
         emit(status(0, "ready", "off"));
       }, 3600));
       return undefined as T;
+    case "pause_session":
+      if (pausedAt === null) {
+        pausedAt = Date.now();
+        queueMicrotask(() => emit({ type: "paused", at_s: (pausedAt! - t0 - pausedTotal) / 1000 }));
+      }
+      return undefined as T;
+    case "resume_session":
+      if (pausedAt !== null) {
+        pausedTotal += Date.now() - pausedAt;
+        pausedAt = null;
+        queueMicrotask(() => emit({ type: "resumed", at_s: (Date.now() - t0 - pausedTotal) / 1000 }));
+      }
+      return undefined as T;
     case "discard_session":
       timers.forEach(clearTimeout); timers = [];
       live = null;
@@ -122,12 +135,18 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
 }
 
 let t0 = 0;
+let pausedAt: number | null = null;
+let pausedTotal = 0;
 function status(backlog: number, asr: "off" | "ready" | "busy" | "loading", llm: "off" | "loading" | "busy"): SessionEvent {
-  return { type: "status", elapsed_s: (Date.now() - t0) / 1000, backlog_s: backlog, mic_level: Math.random() * 0.05, call_level: Math.random() * 0.04, asr, llm };
+  const now = Date.now();
+  const elapsed = (now - t0 - pausedTotal - (pausedAt ? now - pausedAt : 0)) / 1000;
+  return { type: "status", elapsed_s: elapsed, backlog_s: backlog, mic_level: Math.random() * 0.05, call_level: Math.random() * 0.04, asr, llm, paused: pausedAt !== null };
 }
 
 function startFake(title: string, labels: string[]): MeetingMeta {
   t0 = Date.now();
+  pausedAt = null;
+  pausedTotal = 0;
   live = { id: "fake-live", title: title || "Sync semanal — produto", started_at: new Date().toISOString(), duration_s: 0, finished: false, labels };
   const meta = live;
   queueMicrotask(() => emit({ type: "started", meeting: meta }));

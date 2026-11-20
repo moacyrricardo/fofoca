@@ -3,6 +3,9 @@
 //! ```text
 //! fofoca-cli config                         show config path and values
 //! fofoca-cli transcribe <file.wav>          transcribe a 16 kHz mono WAV in chunks
+//! fofoca-cli bench-latency <file.wav> [--min S] [--ref ref.txt]
+//!                                           replay a WAV in simulated real time through the live
+//!                                           chunker; print per-line latency, backlog and WER
 //! fofoca-cli record --seconds N [--title T] [--label L]… [--summary-at S] [--no-summary | --discard]
 //! fofoca-cli summarize <meeting-id>         write a final summary for a stored meeting
 //! fofoca-cli list [--label L]               list stored meetings (optionally only those labelled L)
@@ -41,6 +44,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Some("transcribe") => transcribe(&cfg, args.get(1).context("usage: transcribe <file.wav>")?),
+        Some("bench-latency") => bench_latency(&cfg, &args[1..]),
         Some("record") => record(cfg, store, &args[1..]),
         Some("summarize") => summarize(&cfg, &store, args.get(1).context("usage: summarize <meeting-id>")?),
         Some("calendar") => calendar(&args[1..]),
@@ -90,6 +94,91 @@ fn transcribe(cfg: &Config, path: &str) -> Result<()> {
     let took = t1.elapsed().as_secs_f64();
     eprintln!("transcribed {audio_s:.1}s of audio in {took:.1}s ({:.2}x real time)", took / audio_s);
     Ok(())
+}
+
+/// Spec 010 measurement. Time is simulated: audio "arrives" at real speed while each Whisper
+/// request (real, on the configured device) takes as long as it takes, so the numbers match a live
+/// session without needing a call. `--min 0` = fixed chunks only.
+fn bench_latency(cfg: &Config, args: &[String]) -> Result<()> {
+    const USAGE: &str = "usage: bench-latency <file.wav> [--min SECONDS] [--ref reference.txt]";
+    let path = args.first().filter(|a| !a.starts_with("--")).context(USAGE)?;
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let min_s: u32 = flag("--min").map(|s| s.parse()).transpose()?.unwrap_or(cfg.min_chunk_seconds);
+    let samples = audio::read_wav(path.as_ref())?;
+    let sr = SAMPLE_RATE as usize;
+    let (chunk, min) = ((cfg.chunk_seconds * SAMPLE_RATE) as usize, (min_s * SAMPLE_RATE) as usize);
+    let server = ModelServer::start(Kind::Whisper, cfg)?;
+    let client = WhisperClient::new(&server.base_url)?;
+    let (mut t, mut pos, mut prompt) = (0.0f64, 0usize, String::new());
+    let (mut latencies, mut text, mut requests, mut busy) = (Vec::new(), Vec::new(), 0, 0.0);
+    let mut checked_at = 0usize;
+    while pos < samples.len() {
+        let end = ((t * sr as f64) as usize).min(samples.len());
+        let buf = &samples[pos..end];
+        let n = if buf.len() >= chunk {
+            audio::quiet_cut(&buf[..buf.len().min(chunk + 1)], &[], chunk, 3 * sr)
+        } else if end == samples.len() {
+            buf.len()
+        } else if min > 0 && buf.len() >= min && buf.len() >= checked_at + sr / 2 {
+            checked_at = buf.len();
+            audio::pause_cut(buf, &[], min, chunk).unwrap_or(0)
+        } else {
+            0
+        };
+        if n == 0 {
+            t += 0.1;
+            continue;
+        }
+        checked_at = 0;
+        let offset = pos as f64 / sr as f64;
+        let t0 = Instant::now();
+        let segs = client.transcribe(audio::wav_bytes(&buf[..n]), &cfg.language, &prompt)?;
+        let took = t0.elapsed().as_secs_f64();
+        t += took;
+        busy += took;
+        requests += 1;
+        for s in segs {
+            let lat = t - (offset + s.end);
+            println!("[{}] +{lat:4.1}s  {}", mmss(offset + s.start), s.text);
+            latencies.push(lat);
+            text.push(s.text.clone());
+            prompt = s.text;
+        }
+        eprintln!("  chunk {:5.1}s at {}  whisper {took:4.1}s  backlog {:4.1}s", n as f64 / sr as f64, mmss(offset), (end - pos - n) as f64 / sr as f64);
+        pos += n;
+    }
+    latencies.sort_by(|a, b| a.total_cmp(b));
+    let pct = |p: f64| latencies.get(((latencies.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or(0.0);
+    let audio_s = samples.len() as f64 / sr as f64;
+    eprintln!(
+        "min_chunk {min_s}s: {requests} requests, whisper busy {busy:.1}s for {audio_s:.1}s of audio; line latency median {:.1}s, p90 {:.1}s, max {:.1}s; done {:.1}s after the audio ended",
+        pct(0.5), pct(0.9), pct(1.0), t - audio_s
+    );
+    if let Some(r) = flag("--ref") {
+        eprintln!("WER {:.1}%", 100.0 * wer(&std::fs::read_to_string(r)?, &text.join(" ")));
+    }
+    Ok(())
+}
+
+/// Word error rate after lower-casing and dropping punctuation (good for comparing settings, not
+/// for absolute numbers: digits vs spelled-out numbers count as errors).
+fn wer(reference: &str, hypothesis: &str) -> f64 {
+    let words = |s: &str| -> Vec<String> {
+        s.split_whitespace()
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect()
+    };
+    let (r, h) = (words(reference), words(hypothesis));
+    let mut prev: Vec<usize> = (0..=h.len()).collect();
+    for (i, rw) in r.iter().enumerate() {
+        let mut cur = vec![i + 1; h.len() + 1];
+        for (j, hw) in h.iter().enumerate() {
+            cur[j + 1] = (prev[j] + usize::from(rw != hw)).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[h.len()] as f64 / r.len().max(1) as f64
 }
 
 fn record(cfg: Config, store: Store, args: &[String]) -> Result<()> {

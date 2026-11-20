@@ -149,6 +149,17 @@ fn stop_session(state: State<AppState>, summarize: bool) -> CmdResult<()> {
     }
 }
 
+/// Pause / resume keeping audio (spec 010). Takes effect immediately.
+#[tauri::command]
+fn pause_session(state: State<AppState>) -> CmdResult<()> {
+    state.session.lock().unwrap().as_ref().map(|s| s.pause()).ok_or_else(|| "no recording is running".into())
+}
+
+#[tauri::command]
+fn resume_session(state: State<AppState>) -> CmdResult<()> {
+    state.session.lock().unwrap().as_ref().map(|s| s.resume()).ok_or_else(|| "no recording is running".into())
+}
+
 #[tauri::command]
 fn discard_session(state: State<AppState>) -> CmdResult<()> {
     match state.session.lock().unwrap().as_ref() {
@@ -284,6 +295,8 @@ pub fn run() {
             summarize_now,
             stop_session,
             discard_session,
+            pause_session,
+            resume_session,
             calendar_settings,
             add_calendar,
             remove_calendar,
