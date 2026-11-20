@@ -380,7 +380,7 @@ fn eval_notes(cfg: &Config, args: &[String]) -> Result<()> {
 /// Transcribe a whole 16 kHz mono WAV like a live session would (quiet-point chunks, VAD).
 fn transcribe_segments(cfg: &Config, samples: &[i16]) -> Result<Vec<fofoca_core::Segment>> {
     let hooks = fofoca_core::pipeline::Hooks { progress: &|_, _| {}, yield_gpu: &|| false };
-    fofoca_core::pipeline::transcribe_samples(cfg, samples, &hooks)
+    fofoca_core::pipeline::transcribe_samples(cfg, samples, fofoca_core::Track::Call, &hooks)
 }
 
 /// Import a recording made elsewhere as a meeting (spec 012) and print its notes.

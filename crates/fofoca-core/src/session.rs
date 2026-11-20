@@ -57,8 +57,11 @@ pub enum SessionEvent {
     Segment { segment: Segment },
     /// Capture stopped; post-call work may still be queued behind model loading.
     Stopping,
-    /// A post-call step started: `transcribing`, `summarizing`, `saving`.
+    /// A post-call step started: `transcribing`, `transcript` (per-track rebuild, spec 018),
+    /// `speakers`, `summarizing`, `saving`.
     Step { step: String },
+    /// How far a long post-call step is, 0..=1 (the per-track rebuild).
+    Progress { step: String, progress: f64 },
     Summary { summary: Summary },
     Finished { meeting: MeetingMeta },
     /// The recording was thrown away: its folder (audio, transcript, summaries) is deleted.
@@ -425,8 +428,10 @@ impl Worker {
 
         mic_wav.finish()?;
         sys_wav.finish()?;
-        if !live {
-            self.transcribe_recording(chunk)?;
+        // Record-only has no transcript yet, so it always runs; after a live transcript it's the
+        // `transcript_after` step (spec 018).
+        if !live || self.cfg.workflow.transcript_after {
+            self.rebuild_transcript();
         }
         // Whisper isn't needed any more; free the GPU before the CPU and summary steps.
         self.asr = None;
@@ -465,23 +470,30 @@ impl Worker {
         Ok(Outcome::Finished)
     }
 
-    /// Record-only mode (spec 015): transcribe the saved tracks after the call, in the same
-    /// quiet-point chunks a live session uses, each track on its own (spec 018).
-    fn transcribe_recording(&mut self, chunk: usize) -> Result<()> {
-        let mic = audio::read_wav(&self.dir.join("mic.wav"))?;
-        let sys = audio::read_wav(&self.dir.join("system.wav"))?;
-        let total = mic.len().max(sys.len());
-        self.offset_s = 0.0;
-        let mut pos = 0;
-        while pos < total {
-            let (m, s) = (&mic[pos.min(mic.len())..], &sys[pos.min(sys.len())..]);
-            let (m, s) = (&m[..m.len().min(chunk + 1)], &s[..s.len().min(chunk + 1)]);
-            let n = audio::quiet_cut(m, s, chunk, 3 * SAMPLE_RATE as usize).max(1).min(total - pos);
-            self.transcribe_chunk(&m[..n.min(m.len())], &s[..n.min(s.len())]);
-            pos += n;
+    /// Transcribe each saved track on its own with the GPU free of live work and replace the live
+    /// transcript (spec 018) — also how record-only (spec 015) gets its transcript. Reuses the
+    /// live Whisper if it's loaded. A failure keeps the live transcript and the audio.
+    fn rebuild_transcript(&mut self) {
+        (self.emit)(SessionEvent::Step { step: pipeline::STEP_TRANSCRIPT.into() });
+        let emit = self.emit.clone();
+        let progress = move |step: &str, progress: f64| emit(SessionEvent::Progress { step: step.into(), progress });
+        let hooks = pipeline::Hooks { progress: &progress, yield_gpu: &|| false };
+        let mut asr = self.asr.take();
+        self.set(Kind::Whisper, ModelState::Busy);
+        let result = pipeline::retranscribe_with(&self.store, &self.cfg, &self.meeting.id, &hooks, &mut asr);
+        self.set(Kind::Whisper, if asr.is_some() { ModelState::Ready } else { ModelState::Off });
+        self.asr = asr;
+        match result {
+            Ok(pipeline::Rebuild::Done { .. }) => match self.store.load(&self.meeting.id) {
+                Ok(m) => self.segments = m.segments,
+                Err(e) => self.error(format!("reloading the transcript: {e:#}")),
+            },
+            Ok(pipeline::Rebuild::Skipped(msg)) => self.notice(&msg),
+            Err(e) => {
+                self.post_ok = false;
+                self.error(format!("transcribing each track failed (the live transcript is kept): {e:#}"));
+            }
         }
-        self.offset_s = total as f64 / SAMPLE_RATE as f64;
-        Ok(())
     }
 
     /// Spec 018: each track with speech goes to Whisper on its own (mic first, then call, in the
