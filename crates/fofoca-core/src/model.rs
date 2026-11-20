@@ -73,6 +73,19 @@ pub struct MeetingMeta {
     /// series, so later recordings can inherit labels (spec 009).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar_uid: Option<String>,
+    /// Paused intervals (spec 010). Audio during a pause is not kept, so the meeting timeline is
+    /// continuous: `at_s` is the meeting time where the pause sits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pauses: Vec<Pause>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Pause {
+    pub at_s: f64,
+    /// RFC 3339 wall-clock times; `to` is `None` if the recording ended while paused.
+    pub from: String,
+    #[serde(default)]
+    pub to: Option<String>,
 }
 
 /// What a new meeting starts with.

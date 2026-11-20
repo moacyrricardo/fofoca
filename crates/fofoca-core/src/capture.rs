@@ -23,6 +23,8 @@ pub enum Source {
 pub struct TrackBuffer {
     pub samples: Mutex<Vec<i16>>,
     level_bits: AtomicU32,
+    /// While set (Pause, spec 010), captured audio is dropped; the level meter still moves.
+    discard: AtomicBool,
 }
 
 impl TrackBuffer {
@@ -31,6 +33,19 @@ impl TrackBuffer {
     }
     fn set_level(&self, v: f32) {
         self.level_bits.store(v.to_bits(), Ordering::Relaxed)
+    }
+    pub fn set_discard(&self, on: bool) {
+        self.discard.store(on, Ordering::SeqCst)
+    }
+    pub fn discarding(&self) -> bool {
+        self.discard.load(Ordering::SeqCst)
+    }
+    /// Append captured samples unless paused.
+    pub fn push(&self, s: &[i16]) {
+        self.set_level(rms(s));
+        if !self.discarding() {
+            self.samples.lock().unwrap().extend_from_slice(s);
+        }
     }
     pub fn len(&self) -> usize {
         self.samples.lock().unwrap().len()
@@ -98,8 +113,7 @@ impl Capture {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let s = bytes_to_samples(&bytes[..n], &mut carry);
-                            buf.set_level(rms(&s));
-                            buf.samples.lock().unwrap().extend_from_slice(&s);
+                            buf.push(&s);
                         }
                     }
                 }
@@ -124,5 +138,23 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paused_buffer_drops_audio_but_keeps_the_meter() {
+        let b = TrackBuffer::default();
+        b.push(&[1000; 160]);
+        b.set_discard(true);
+        b.push(&[3000; 160]);
+        assert_eq!(b.len(), 160, "audio during a pause is not kept");
+        assert!(b.level() > 0.05, "the meter still shows the mic is live");
+        b.set_discard(false);
+        b.push(&[1000; 160]);
+        assert_eq!(b.len(), 320);
     }
 }

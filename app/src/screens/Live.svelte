@@ -2,7 +2,7 @@
   import { tick } from "svelte";
   import { api } from "../lib/api";
   import { live } from "../lib/live.svelte";
-  import { markdown, mmss, shortModel } from "../lib/format";
+  import { markdown, mmss, pausesBefore, shortModel } from "../lib/format";
   import type { ConfigView, ModelState } from "../lib/types";
   import LabelEditor from "./LabelEditor.svelte";
 
@@ -69,6 +69,24 @@
     }
   }
 
+  const paused = $derived(!!s?.paused);
+  const chunkText = $derived.by(() => {
+    const max = config?.config.chunk_seconds ?? 30;
+    const min = config?.config.min_chunk_seconds ?? 0;
+    return min > 0 && min < max ? `${min}–${max} s` : `${max} s`;
+  });
+  let toggling = $state(false);
+  async function togglePause() {
+    toggling = true;
+    try {
+      await (paused ? api.resume() : api.pause());
+    } catch (e) {
+      notify(String(e), true);
+    } finally {
+      toggling = false;
+    }
+  }
+
   async function discard() {
     confirmDiscard = false;
     live.stopping = true;
@@ -94,13 +112,14 @@
     </div>
   {:else}
     <div class="livebar">
-      <span class="dot live big"></span>
-      <span class="timer">{mmss(s?.elapsed_s ?? 0)}</span>
-      <div class="ttl"><b>{live.meeting.title}</b><div class="faint">recording mic + system audio</div>
+      <span class="dot big" class:live={!paused} class:idle={paused}></span>
+      <span class="timer" class:dim={paused}>{mmss(s?.elapsed_s ?? 0)}</span>
+      <div class="ttl"><b>{live.meeting.title}</b><div class="faint" class:pausedtxt={paused}>{paused ? "Paused — nothing is being recorded" : "recording mic + system audio"}</div>
         <div class="livelabels"><LabelEditor labels={live.meeting.labels ?? []} onchange={setLiveLabels} placeholder="+ label" compact /></div></div>
-      <div class="meter"><span>You</span><span class="bars">{#each bars(s?.mic_level ?? 0) as h}<i style="height:{h}px"></i>{/each}</span></div>
-      <div class="meter sys"><span>Call</span><span class="bars">{#each bars(s?.call_level ?? 0) as h}<i style="height:{h}px"></i>{/each}</span></div>
+      <div class="meter" class:dim={paused}><span>You</span><span class="bars">{#each bars(s?.mic_level ?? 0) as h}<i style="height:{h}px"></i>{/each}</span></div>
+      <div class="meter sys" class:dim={paused}><span>Call</span><span class="bars">{#each bars(s?.call_level ?? 0) as h}<i style="height:{h}px"></i>{/each}</span></div>
       <span class="sp"></span>
+      <button class="btn sm" class:ghost={!paused} class:teal={paused} onclick={togglePause} disabled={live.stopping || toggling} title={paused ? "Keep recording" : "Stop keeping audio until you resume"}>{paused ? "▶ Resume" : "❚❚ Pause"}</button>
       <button class="btn ghost sm" onclick={() => (confirmDiscard = true)} disabled={live.stopping} title="Stop and delete this recording">✕ Discard</button>
       <button class="btn ghost sm" onclick={() => stop(false)} disabled={live.stopping} title="Stop and keep the transcript, without a summary">■ Stop, no summary</button>
       <button class="btn rec" onclick={() => stop(true)} disabled={live.stopping}>■ Stop &amp; summarize</button>
@@ -111,20 +130,22 @@
         <div class="txhead">
           <h2>Live transcript</h2>
           <span class="chip gpu">Whisper · {label[s?.asr ?? "off"]}</span>
-          <span class="faint small">{config?.config.language ?? ""} · {config?.config.chunk_seconds ?? 30} s chunks</span>
+          <span class="faint small">{config?.config.language ?? ""} · {chunkText} chunks</span>
         </div>
         {#if live.segments.length === 0}
           <p class="faint empty">
-            {#if (s?.asr ?? "off") === "loading"}Loading Whisper on the GPU…{:else}Listening — lines appear after each chunk (about every {config?.config.chunk_seconds ?? 30} s).{/if}
+            {#if (s?.asr ?? "off") === "loading"}Loading Whisper on the GPU…{:else}Listening — lines appear after each chunk ({chunkText}, cut at pauses in speech).{/if}
           </p>
         {/if}
         {#each live.segments as seg, i (i)}
+          {#each pausesBefore(live.pauses, live.segments, i) as p}<div class="pausemark">— paused at {mmss(p)} —</div>{/each}
           <div class="line">
             <span class="ts">{mmss(seg.start)}</span>
             <span class="who {seg.track}">{seg.track === "you" ? "You" : "Call"}</span>
             <span class="text">{seg.text}</span>
           </div>
         {/each}
+        {#each pausesBefore(live.pauses, live.segments, live.segments.length) as p}<div class="pausemark">— paused at {mmss(p)} —</div>{/each}
       </div>
 
       <div class="card side">
@@ -203,4 +224,7 @@
   .m .chip { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
   .startlabels { margin-top: 8px; display: flex; justify-content: center; }
   .livelabels { margin-top: 4px; }
+  .dim { opacity: .45; }
+  .pausedtxt { color: var(--peach); font-weight: 700; }
+  .pausemark { text-align: center; color: var(--ink-3); font-size: 12px; font-weight: 700; padding: 8px 0; border-bottom: 1px solid #22405c; }
 </style>

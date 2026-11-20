@@ -62,6 +62,13 @@
       case "segment":
         live.segments.push(e.segment);
         break;
+      case "paused":
+        live.pauses.push(e.at_s);
+        if (live.status) live.status.paused = true;
+        break;
+      case "resumed":
+        if (live.status) live.status.paused = false;
+        break;
       case "summary":
         if (e.summary.kind === "partial") live.partial = e.summary;
         else live.final = e.summary;

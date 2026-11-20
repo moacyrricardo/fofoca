@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api } from "../lib/api";
-  import { markdown, minutes, mmss, when } from "../lib/format";
+  import { markdown, minutes, mmss, pausesBefore, when } from "../lib/format";
   import type { Meeting } from "../lib/types";
   import summaryIcon from "../assets/summary.png";
   import transcriptionIcon from "../assets/transcription.png";
@@ -35,6 +35,7 @@
     }
   }
 
+  const pauseAts = $derived(meeting?.meta.pauses?.map((p) => p.at_s) ?? []);
   const final = $derived(meeting?.summaries.filter((s) => s.kind === "final").at(-1));
   const partials = $derived(meeting?.summaries.filter((s) => s.kind === "partial") ?? []);
 </script>
@@ -77,6 +78,7 @@
     {:else}
       <div class="card tx">
         {#each meeting.segments as seg, i (i)}
+          {#each pausesBefore(pauseAts, meeting.segments, i) as p}<div class="pausemark">— paused at {mmss(p)} —</div>{/each}
           <div class="line">
             <span class="ts">{mmss(seg.start)}</span>
             <span class="who {seg.track}">{seg.track === "you" ? "You" : "Call"}</span>
@@ -96,6 +98,7 @@
   .back:hover { color: var(--ink); }
   .small { font-size: 13px; }
   .mlabels { margin-top: 10px; }
+  .pausemark { text-align: center; color: var(--ink-3); font-size: 12px; font-weight: 700; padding: 8px 0; border-bottom: 1px solid #22405c; }
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 18px 0 16px; }
   .tab { background: none; border: 0; color: var(--ink-2); font-weight: 800; font-size: 14px; padding: 9px 14px; border-bottom: 3px solid transparent; cursor: pointer; display: flex; gap: 7px; align-items: center; }
   .tab.on { color: var(--ink); border-bottom-color: var(--coral); }

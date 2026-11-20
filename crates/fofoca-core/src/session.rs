@@ -19,10 +19,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::audio::{self, WavAppender, SAMPLE_RATE};
-use crate::capture::{Capture, CaptureStopper, Source};
+use crate::capture::{Capture, CaptureStopper, Source, TrackBuffer};
 use crate::config::Config;
 use crate::llm::LlmClient;
-use crate::model::{MeetingMeta, Segment, StartInfo, Summary, SummaryKind, Word};
+use crate::model::{MeetingMeta, Pause, Segment, StartInfo, Summary, SummaryKind, Word};
 use crate::prompts;
 use crate::servers::{Kind, ModelServer};
 use crate::store::Store;
@@ -42,7 +42,10 @@ pub enum ModelState {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
     Started { meeting: MeetingMeta },
-    Status { elapsed_s: f64, backlog_s: f64, mic_level: f32, call_level: f32, asr: ModelState, llm: ModelState },
+    Status { elapsed_s: f64, backlog_s: f64, mic_level: f32, call_level: f32, asr: ModelState, llm: ModelState, paused: bool },
+    /// Recording paused at meeting time `at_s`: audio from now on is dropped (spec 010).
+    Paused { at_s: f64 },
+    Resumed { at_s: f64 },
     Segment { segment: Segment },
     /// A post-call step started: `transcribing`, `summarizing`, `saving`.
     Step { step: String },
@@ -59,6 +62,8 @@ pub type EventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 
 enum Command {
     Summarize,
+    Pause,
+    Resume,
     Stop { summarize: bool },
     Discard,
 }
@@ -69,6 +74,8 @@ pub const MIN_WORDS_TO_SUMMARIZE: usize = 25;
 pub struct Session {
     tx: Sender<Command>,
     stoppers: [CaptureStopper; 2],
+    buffers: [Arc<TrackBuffer>; 2],
+    shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
     pub meeting: MeetingMeta,
 }
@@ -77,6 +84,18 @@ struct Shared {
     asr: Mutex<ModelState>,
     llm: Mutex<ModelState>,
     running: AtomicBool,
+    /// When the current pause began, and the total of earlier pauses — the timer excludes both.
+    paused: Mutex<(Option<Instant>, Duration)>,
+}
+
+impl Shared {
+    fn paused_for(&self) -> Duration {
+        let p = self.paused.lock().unwrap();
+        p.1 + p.0.map(|t| t.elapsed()).unwrap_or_default()
+    }
+    fn is_paused(&self) -> bool {
+        self.paused.lock().unwrap().0.is_some()
+    }
 }
 
 impl Session {
@@ -91,9 +110,11 @@ impl Session {
             asr: Mutex::new(ModelState::Off),
             llm: Mutex::new(ModelState::Off),
             running: AtomicBool::new(true),
+            paused: Mutex::new((None, Duration::ZERO)),
         });
         let (tx, rx) = mpsc::channel();
         let stoppers = [mic.stopper(), sys.stopper()];
+        let buffers = [mic.buffer.clone(), sys.buffer.clone()];
         let ticker = spawn_ticker(shared.clone(), mic.buffer.clone(), sys.buffer.clone(), on_event.clone());
         let mut worker = Worker {
             dir: store.dir(&meeting.id),
@@ -101,18 +122,51 @@ impl Session {
             store,
             meeting: meeting.clone(),
             emit: on_event,
-            shared,
+            shared: shared.clone(),
             mic,
             sys,
             asr: None,
             segments: Vec::new(),
             offset_s: 0.0,
+            pause_checked_at: 0,
         };
         let handle = std::thread::Builder::new().name("session".into()).spawn(move || {
             worker.run(rx);
             let _ = ticker.join();
         })?;
-        Ok(Session { tx, stoppers, worker: Some(handle), meeting })
+        Ok(Session { tx, stoppers, buffers, shared, worker: Some(handle), meeting })
+    }
+
+    /// Stop keeping audio until `resume` — takes effect immediately, even mid model swap.
+    /// What was already captured is transcribed right away.
+    pub fn pause(&self) {
+        {
+            let mut p = self.shared.paused.lock().unwrap();
+            if p.0.is_some() {
+                return;
+            }
+            p.0 = Some(Instant::now());
+        }
+        for b in &self.buffers {
+            b.set_discard(true);
+        }
+        let _ = self.tx.send(Command::Pause);
+    }
+
+    pub fn resume(&self) {
+        {
+            let mut p = self.shared.paused.lock().unwrap();
+            let Some(since) = p.0.take() else { return };
+            p.1 += since.elapsed();
+        }
+        for b in &self.buffers {
+            b.set_discard(false);
+        }
+        let _ = self.tx.send(Command::Resume);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.shared.is_paused()
     }
 
     /// Ask for a "summary so far" (swaps Whisper out and the LLM in, then back).
@@ -158,7 +212,8 @@ fn spawn_ticker(
         while shared.running.load(Ordering::Relaxed) {
             let backlog = mic.len().min(sys.len()) as f64 / SAMPLE_RATE as f64;
             emit(SessionEvent::Status {
-                elapsed_s: started.elapsed().as_secs_f64(),
+                elapsed_s: started.elapsed().saturating_sub(shared.paused_for()).as_secs_f64(),
+                paused: shared.is_paused(),
                 backlog_s: backlog,
                 mic_level: mic.level(),
                 call_level: sys.level(),
@@ -188,6 +243,8 @@ struct Worker {
     segments: Vec<Segment>,
     /// Meeting time (s) at which the next chunk starts.
     offset_s: f64,
+    /// Buffer length when we last looked for a pause to cut at (avoid rescanning every 100 ms).
+    pause_checked_at: usize,
 }
 
 impl Worker {
@@ -234,11 +291,31 @@ impl Worker {
         let mut stopping = false;
         let mut final_summary = true;
         let mut pending_summary = false;
+        let mut flush = false;
+        let min_chunk = (self.cfg.min_chunk_seconds * SAMPLE_RATE) as usize;
 
         loop {
             while let Ok(cmd) = rx.try_recv() {
                 match cmd {
                     Command::Summarize => pending_summary = true,
+                    Command::Pause => {
+                        // Capture is already discarding; what's buffered goes before the pause.
+                        let buffered = self.mic.buffer.len().max(self.sys.buffer.len());
+                        let at_s = self.offset_s + buffered as f64 / SAMPLE_RATE as f64;
+                        flush = true;
+                        let pause = Pause { at_s, from: chrono::Local::now().to_rfc3339(), to: None };
+                        self.update_meta(|m| m.pauses.push(pause));
+                        (self.emit)(SessionEvent::Paused { at_s });
+                    }
+                    Command::Resume => {
+                        let now = chrono::Local::now().to_rfc3339();
+                        self.update_meta(|m| {
+                            if let Some(p) = m.pauses.last_mut().filter(|p| p.to.is_none()) {
+                                p.to = Some(now);
+                            }
+                        });
+                        (self.emit)(SessionEvent::Resumed { at_s: self.offset_s });
+                    }
                     Command::Discard => {
                         self.mic.stop();
                         self.sys.stop();
@@ -261,8 +338,15 @@ impl Worker {
             let n = if available >= chunk {
                 let (m, s) = (self.mic.buffer.peek(chunk), self.sys.buffer.peek(chunk));
                 audio::quiet_cut(&m, &s, chunk, 3 * SAMPLE_RATE as usize)
-            } else if stopping {
+            } else if stopping || flush {
+                flush = false;
                 self.mic.buffer.len().max(self.sys.buffer.len())
+            } else if min_chunk > 0 && self.asr.is_some() && available >= min_chunk && available >= self.pause_checked_at + SAMPLE_RATE as usize / 2 {
+                // Whisper is idle and there's no backlog: end the chunk at the first natural
+                // pause instead of waiting for a full one (spec 010).
+                self.pause_checked_at = available;
+                let (m, s) = (self.mic.buffer.peek(available), self.sys.buffer.peek(available));
+                audio::pause_cut(&m, &s, min_chunk, chunk).unwrap_or(0)
             } else {
                 0
             };
@@ -271,6 +355,7 @@ impl Worker {
                 let s = self.sys.buffer.take(n);
                 mic_wav.append(&m)?;
                 sys_wav.append(&s)?;
+                self.pause_checked_at = 0;
                 self.transcribe_chunk(&m, &s);
                 continue; // drain the backlog before anything else
             }
@@ -336,6 +421,14 @@ impl Worker {
                 }
             }
             Err(e) => self.error(format!("transcription failed for {:.0}–{:.0} s: {e:#}", offset, offset + len_s)),
+        }
+    }
+
+    /// Change meta.json on disk (re-read first, see `Store::update_meta`) and keep our copy.
+    fn update_meta(&mut self, f: impl FnOnce(&mut MeetingMeta)) {
+        match self.store.update_meta(&self.meeting.id, f) {
+            Ok(m) => self.meeting = m,
+            Err(e) => self.error(format!("saving meeting info: {e:#}")),
         }
     }
 

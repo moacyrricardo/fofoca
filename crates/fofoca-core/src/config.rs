@@ -10,8 +10,12 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     /// Spoken language passed to Whisper (`pt`, `en`, …) — also selects the prompt language.
     pub language: String,
-    /// Length of each transcription chunk.
+    /// Longest transcription chunk.
     pub chunk_seconds: u32,
+    /// When Whisper is idle, end a chunk at the first natural pause after this many seconds
+    /// instead of waiting for `chunk_seconds` (spec 010). 0 = always use full chunks.
+    #[serde(default = "default_min_chunk")]
+    pub min_chunk_seconds: u32,
     /// Where meetings are stored. Defaults to `$XDG_DATA_HOME/fofoca/meetings`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meetings_dir: Option<PathBuf>,
@@ -30,6 +34,12 @@ pub struct WhisperConfig {
     /// silence, and ~10 s instead of ~18 s per 30 s speech chunk on the MX230.
     #[serde(default = "default_vad_model")]
     pub vad_model: Option<PathBuf>,
+}
+
+/// Measured on the 75 s pt-BR recording (MX230, turbo + VAD): line latency median 21.5 s → 12.7 s,
+/// worst 30.7 s → 22.4 s versus fixed 30 s chunks, same WER, Whisper busy 70 % of real time.
+fn default_min_chunk() -> u32 {
+    8
 }
 
 fn default_vad_model() -> Option<PathBuf> {
@@ -52,6 +62,7 @@ impl Default for Config {
         Config {
             language: "pt".into(),
             chunk_seconds: 30,
+            min_chunk_seconds: default_min_chunk(),
             meetings_dir: None,
             whisper: WhisperConfig {
                 server: data.join("bin/whisper/whisper-server"),
