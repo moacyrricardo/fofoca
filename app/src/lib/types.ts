@@ -9,7 +9,12 @@ export interface SpeakerInfo { name?: string | null }
 export interface Summary { kind: "partial" | "final"; at_s: number; text: string; model: string; gen_tokens_per_s: number }
 export interface MeetingMeta { id: string; title: string; started_at: string; duration_s: number; finished: boolean; attendees?: string[]; labels?: string[]; calendar_uid?: string; pauses?: Pause[]; steps_done?: string[] }
 export interface Pause { at_s: number; from: string; to: string | null }
-export interface Meeting { meta: MeetingMeta; segments: Segment[]; summaries: Summary[]; speakers?: Record<string, SpeakerInfo> }
+export interface Meeting { meta: MeetingMeta; segments: Segment[]; summaries: Summary[]; speakers?: Record<string, SpeakerInfo>; notes?: Notes | null }
+/** Grounded notes (spec 005): every item cites transcript line start times (s). */
+export interface NoteItem { text: string; refs: number[] }
+export interface NoteAction { text: string; owner: string | null; due: string | null; refs: number[] }
+export interface NoteFlag { section: string; text: string; reason: string; refs: number[] }
+export interface Notes { summary: NoteItem[]; decisions: NoteItem[]; action_items: NoteAction[]; flagged: NoteFlag[]; model: string; gen_tokens_per_s: number }
 
 export interface Status {
   elapsed_s: number; backlog_s: number; mic_level: number; call_level: number; asr: ModelState; llm: ModelState; paused?: boolean;

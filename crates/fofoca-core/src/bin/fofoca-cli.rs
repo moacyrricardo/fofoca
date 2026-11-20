@@ -9,6 +9,9 @@
 //! fofoca-cli record --seconds N [--title T] [--label L]… [--summary-at S] [--no-summary | --discard]
 //! fofoca-cli summarize <meeting-id>         write a final summary for a stored meeting
 //! fofoca-cli diarize <meeting-id>           (re-)run speaker separation on the call track
+//! fofoca-cli notes <meeting-id>             (re-)write grounded notes for a stored meeting
+//! fofoca-cli eval-notes <file.wav> <facts.json>
+//!                                           compare free-text summary vs grounded notes
 //! fofoca-cli diarize-wav <file.wav> [--threshold T] [--max N]   print speaker turns of a WAV
 //! fofoca-cli list [--label L]               list stored meetings (optionally only those labelled L)
 //! fofoca-cli labels                         known labels with meeting counts
@@ -48,6 +51,8 @@ fn run() -> Result<()> {
         Some("transcribe") => transcribe(&cfg, args.get(1).context("usage: transcribe <file.wav>")?),
         Some("bench-latency") => bench_latency(&cfg, &args[1..]),
         Some("diarize-wav") => diarize_wav(&cfg, &args[1..]),
+        Some("notes") => write_notes(&cfg, &store, args.get(1).context("usage: notes <meeting-id>")?),
+        Some("eval-notes") => eval_notes(&cfg, &args[1..]),
         Some("diarize") => diarize_meeting(&cfg, &store, args.get(1).context("usage: diarize <meeting-id>")?),
         Some("record") => record(cfg, store, &args[1..]),
         Some("summarize") => summarize(&cfg, &store, args.get(1).context("usage: summarize <meeting-id>")?),
@@ -268,6 +273,117 @@ fn label(store: &Store, args: &[String]) -> Result<()> {
     let m = store.set_labels(id, &labels)?;
     println!("{}: {}", m.id, m.labels.join(", "));
     Ok(())
+}
+
+fn write_notes(cfg: &Config, store: &Store, id: &str) -> Result<()> {
+    let m = store.load(id)?;
+    if m.segments.is_empty() {
+        bail!("meeting {id} has no transcript");
+    }
+    let server = ModelServer::start(Kind::Llm, cfg)?;
+    let n = fofoca_core::notes::extract(&LlmClient::new(&server.base_url)?, &m.segments, &m.speakers, &m.meta, cfg)?;
+    println!("{}", fofoca_core::notes::to_markdown(&n, &cfg.language));
+    for f in &n.flagged {
+        eprintln!("couldn't verify ({}): {} — {}", f.section, f.text, f.reason);
+    }
+    store.save_notes(id, &n)?;
+    fofoca_core::pipeline::mark_done(store, id, fofoca_core::pipeline::STEP_NOTES)?;
+    Ok(())
+}
+
+/// Spec 005 evaluation: transcribe a recording, then write a free-text summary and grounded notes
+/// with the same model and count (a) numbers the transcript doesn't contain and (b) reference
+/// facts covered.
+fn eval_notes(cfg: &Config, args: &[String]) -> Result<()> {
+    use fofoca_core::grounding::numbers_in;
+    const USAGE: &str = "usage: eval-notes <file.wav> <facts.json>";
+    let (wav, facts_path) = (args.first().context(USAGE)?, args.get(1).context(USAGE)?);
+    let facts: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(facts_path)?)?;
+    let facts = facts["facts"].as_array().context("facts.json needs a \"facts\" array")?.clone();
+
+    let segments = transcribe_segments(cfg, &audio::read_wav(wav.as_ref())?)?;
+    let meta = fofoca_core::MeetingMeta {
+        id: "eval".into(),
+        title: "eval".into(),
+        started_at: chrono::Local::now().to_rfc3339(),
+        duration_s: 0.0,
+        finished: true,
+        attendees: vec!["Rodrigo".into(), "Fernanda".into()],
+        labels: vec![],
+        calendar_uid: None,
+        pauses: vec![],
+        steps_done: vec![],
+    };
+    let speakers = Default::default();
+    let transcript = prompts::transcript_text(&segments, &speakers, &cfg.language);
+    let said = numbers_in(&transcript);
+
+    let server = ModelServer::start(Kind::Llm, cfg)?;
+    let client = LlmClient::new(&server.base_url)?;
+    let t0 = Instant::now();
+    let free = client.complete(&prompts::final_summary(&transcript, &cfg.language), 700)?.text;
+    let t_free = t0.elapsed().as_secs_f64();
+    let t1 = Instant::now();
+    let notes = fofoca_core::notes::extract(&client, &segments, &speakers, &meta, cfg)?;
+    let t_notes = t1.elapsed().as_secs_f64();
+    drop(server);
+
+    let report = |name: &str, lines: Vec<String>, secs: f64| {
+        let invented: Vec<String> = lines
+            .iter()
+            .flat_map(|l| numbers_in(l))
+            .filter(|n| !said.iter().any(|s| (s - n).abs() < 1e-6))
+            .map(|n| n.to_string())
+            .collect();
+        let covered = facts
+            .iter()
+            .filter(|f| {
+                let nums: Vec<f64> = f["numbers"].as_array().map(|a| a.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default();
+                let keys: Vec<String> = f["keywords"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_lowercase)).collect()).unwrap_or_default();
+                lines.iter().any(|l| {
+                    let low = l.to_lowercase();
+                    let ln = numbers_in(l);
+                    keys.iter().any(|k| low.contains(k.as_str())) && nums.iter().all(|n| ln.iter().any(|x| (x - n).abs() < 1e-6))
+                })
+            })
+            .count();
+        println!("== {name} ({secs:.1}s)\n{}\n", lines.join("\n"));
+        eprintln!("{name}: {} lines, numbers not in the transcript: {} {:?}, facts covered {covered}/{}", lines.len(), invented.len(), invented, facts.len());
+    };
+    report("free-text summary", free.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect(), t_free);
+    let mut kept: Vec<String> = notes.summary.iter().chain(&notes.decisions).map(|i| i.text.clone()).collect();
+    kept.extend(notes.action_items.iter().map(|a| a.text.clone()));
+    report("grounded notes (kept)", kept, t_notes);
+    for f in &notes.flagged {
+        eprintln!("  flagged ({}): {} — {}", f.section, f.text, f.reason);
+    }
+    Ok(())
+}
+
+/// Transcribe a whole 16 kHz mono WAV like a live session would (quiet-point chunks, VAD).
+fn transcribe_segments(cfg: &Config, samples: &[i16]) -> Result<Vec<fofoca_core::Segment>> {
+    let server = ModelServer::start(Kind::Whisper, cfg)?;
+    let client = WhisperClient::new(&server.base_url)?;
+    let chunk = (cfg.chunk_seconds * SAMPLE_RATE) as usize;
+    let (mut pos, mut prompt, mut out) = (0, String::new(), Vec::new());
+    while pos < samples.len() {
+        let rest = &samples[pos..];
+        let n = audio::quiet_cut(&rest[..rest.len().min(chunk + 1)], &[], chunk, 3 * SAMPLE_RATE as usize);
+        let offset = pos as f64 / SAMPLE_RATE as f64;
+        for s in client.transcribe(audio::wav_bytes(&rest[..n]), &cfg.language, &prompt)? {
+            prompt = s.text.clone();
+            out.push(fofoca_core::Segment {
+                start: offset + s.start,
+                end: offset + s.end,
+                words: s.words.into_iter().map(|w| fofoca_core::Word { start: offset + w.start, end: offset + w.end, ..w }).collect(),
+                text: s.text,
+                track: fofoca_core::Track::Call,
+                speaker: None,
+            });
+        }
+        pos += n;
+    }
+    Ok(out)
 }
 
 fn summarize(cfg: &Config, store: &Store, id: &str) -> Result<()> {

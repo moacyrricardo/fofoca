@@ -113,6 +113,27 @@ async fn separate_speakers(app: AppHandle, id: String) -> CmdResult<Meeting> {
     .map_err(err)?
 }
 
+/// (Re-)write grounded notes (spec 005). Loads the summary model, so not while recording.
+#[tauri::command]
+async fn write_notes(app: AppHandle, id: String) -> CmdResult<Meeting> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if state.session.lock().unwrap().is_some() {
+            return Err("a recording is running — the GPU is busy with it".to_string());
+        }
+        let m = state.store.load(&id).map_err(err)?;
+        let server = fofoca_core::servers::ModelServer::start(fofoca_core::servers::Kind::Llm, &state.cfg).map_err(err)?;
+        let client = fofoca_core::llm::LlmClient::new(&server.base_url).map_err(err)?;
+        let notes = fofoca_core::notes::extract(&client, &m.segments, &m.speakers, &m.meta, &state.cfg).map_err(err)?;
+        drop(server);
+        state.store.save_notes(&id, &notes).map_err(err)?;
+        let _ = fofoca_core::pipeline::mark_done(&state.store, &id, fofoca_core::pipeline::STEP_NOTES);
+        state.store.load(&id).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
 #[tauri::command]
 fn active_session(state: State<AppState>) -> Option<MeetingMeta> {
     state.session.lock().unwrap().as_ref().map(|s| s.meeting.clone())
@@ -316,6 +337,7 @@ pub fn run() {
             get_meeting,
             rename_speaker,
             separate_speakers,
+            write_notes,
             active_session,
             start_session,
             summarize_now,

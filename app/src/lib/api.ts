@@ -21,6 +21,7 @@ export const api = {
   meeting: (id: string) => call<Meeting>("get_meeting", { id }),
   renameSpeaker: (id: string, speaker: string, name: string) => call<Meeting>("rename_speaker", { id, speaker, name }),
   separateSpeakers: (id: string) => call<Meeting>("separate_speakers", { id }),
+  writeNotes: (id: string) => call<Meeting>("write_notes", { id }),
   activeSession: () => call<MeetingMeta | null>("active_session"),
   start: (title: string, attendees: string[] = [], labels: string[] = [], calendarUid: string | null = null) =>
     call<MeetingMeta>("start_session", { title, attendees, labels, calendarUid }),

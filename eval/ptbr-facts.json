@@ -1,0 +1,14 @@
+{
+  "about": "Reference facts for the 75 s pt-BR test recording used in the 001 benchmarks (ptbr.wav, not in the repo). A fact counts as covered when one output line contains all its numbers and at least one keyword.",
+  "facts": [
+    { "fact": "Relatório do terceiro trimestre de 2026", "numbers": [], "keywords": ["trimestre", "relatório"] },
+    { "fact": "Indicadores abaixo das expectativas da diretoria", "numbers": [], "keywords": ["indicador", "expectativ", "meta"] },
+    { "fact": "Cliente de Belo Horizonte sumiu depois de prometer fechar o contrato", "numbers": [], "keywords": ["belo horizonte", "bh"] },
+    { "fact": "Orçamento previsto de 120 mil reais", "numbers": [120000], "keywords": ["orçamento", "previsto"] },
+    { "fact": "Executados 87.500 reais", "numbers": [87500], "keywords": ["execut", "gast"] },
+    { "fact": "Equipe do Rodrigo e da Fernanda fez o deploy da nova feature", "numbers": [], "keywords": ["deploy", "feature"] },
+    { "fact": "Deploy na sexta-feira, 15 de novembro", "numbers": [15], "keywords": ["novembro", "sexta"] },
+    { "fact": "Feedback dos usuários positivo", "numbers": [], "keywords": ["feedback"] },
+    { "fact": "Follow-up por e-mail hoje", "numbers": [], "keywords": ["follow-up", "follow up", "e-mail", "email"] }
+  ]
+}

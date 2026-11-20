@@ -120,4 +120,7 @@ pub struct Meeting {
     pub summaries: Vec<Summary>,
     #[serde(default)]
     pub speakers: std::collections::BTreeMap<String, SpeakerInfo>,
+    /// Grounded notes (spec 005), when the final step produced them.
+    #[serde(default)]
+    pub notes: Option<crate::grounding::Notes>,
 }

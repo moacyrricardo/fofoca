@@ -31,7 +31,18 @@ O relatório do 3º trimestre de 2026 mostra indicadores abaixo das metas da dir
 - Enviar o follow-up por e-mail hoje.`;
 
 const meetings: Meeting[] = [
-  { meta: { id: "2026-11-19-140200", title: "Relatório Q3 — revisão com a diretoria", started_at: "2026-11-19T14:02:00-03:00", duration_s: 1104, finished: true, labels: ["trabalho", "diretoria"], attendees: ["Rodrigo Lima", "Fernanda", "Ana"], steps_done: ["speakers"] }, speakers: { s1: { name: "Rodrigo Lima" }, s2: {} }, segments: separated, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
+  { meta: { id: "2026-11-19-140200", title: "Relatório Q3 — revisão com a diretoria", started_at: "2026-11-19T14:02:00-03:00", duration_s: 1104, finished: true, labels: ["trabalho", "diretoria"], attendees: ["Rodrigo Lima", "Fernanda", "Ana"], steps_done: ["speakers"] }, speakers: { s1: { name: "Rodrigo Lima" }, s2: {} }, notes: {
+    summary: [
+      { text: "O relatório do 3º trimestre de 2026 mostra indicadores abaixo das expectativas da diretoria.", refs: [0, 8] },
+      { text: "O cliente de Belo Horizonte prometeu fechar o contrato e sumiu.", refs: [16, 24] },
+      { text: "Orçamento previsto de R$ 120 mil; executados R$ 87.500.", refs: [40] },
+      { text: "A nova feature foi publicada na sexta, 15 de novembro, com feedback positivo.", refs: [48, 56] },
+    ],
+    decisions: [],
+    action_items: [{ text: "Enviar o follow-up por e-mail", owner: "Você", due: "2026-11-19", refs: [64] }],
+    flagged: [{ section: "summary", text: "A diferença no orçamento foi de R$ 26.250.", reason: "26250 isn't said in the cited lines", refs: [40] }],
+    model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2,
+  }, segments: separated, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
   { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true, labels: ["trabalho", "1:1"], calendar_uid: "1" }, segments: segs.slice(0, 3), summaries: [] },
 ];
 
@@ -83,6 +94,10 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       const name = String(args?.name ?? "").trim();
       m.speakers = { ...m.speakers, [String(args?.speaker)]: { name: name || null } };
       return structuredClone(m) as T;
+    }
+    case "write_notes": {
+      const m = meetings.find((x) => x.meta.id === args?.id)!;
+      return new Promise((r) => setTimeout(() => r(structuredClone(m) as T), 1200));
     }
     case "separate_speakers": {
       const m = meetings.find((x) => x.meta.id === args?.id)!;

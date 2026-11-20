@@ -5,6 +5,7 @@
 //!                     transcript.jsonl one Segment per line, appended live
 //!                     summaries.json   Vec<Summary>
 //!                     speakers.json    { "s1": SpeakerInfo, … } (spec 003)
+//!                     notes.json       grounded notes: summary, decisions, action items (spec 005)
 //!                     transcript.live.jsonl  the live transcript, kept when speakers are assigned
 //!                     mic.wav          microphone track
 //!                     system.wav       system-audio track
@@ -144,6 +145,10 @@ impl Store {
         }
     }
 
+    pub fn save_notes(&self, id: &str, notes: &crate::grounding::Notes) -> Result<()> {
+        write_json(&self.dir(id).join("notes.json"), notes)
+    }
+
     pub fn speakers(&self, id: &str) -> BTreeMap<String, SpeakerInfo> {
         read_json(&self.dir(id).join("speakers.json")).unwrap_or_default()
     }
@@ -176,7 +181,8 @@ impl Store {
         let path = dir.join("transcript.jsonl");
         let segments = if path.exists() { read_jsonl(&path)? } else { Vec::new() };
         let summaries = read_json(&dir.join("summaries.json")).unwrap_or_default();
-        Ok(Meeting { meta, segments, summaries, speakers: self.speakers(id) })
+        let notes = read_json(&dir.join("notes.json")).ok();
+        Ok(Meeting { meta, segments, summaries, speakers: self.speakers(id), notes })
     }
 
     /// All meetings (or only those carrying `label`), newest first. Folders without a readable

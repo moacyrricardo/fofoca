@@ -9,6 +9,17 @@ use crate::store::Store;
 use crate::{audio, diarize, speakers};
 
 pub const STEP_SPEAKERS: &str = "speakers";
+pub const STEP_NOTES: &str = "notes";
+
+/// Record a finished step in `meta.steps_done`.
+pub fn mark_done(store: &Store, id: &str, step: &str) -> Result<()> {
+    store.update_meta(id, |m| {
+        if !m.steps_done.iter().any(|s| s == step) {
+            m.steps_done.push(step.into());
+        }
+    })?;
+    Ok(())
+}
 
 pub enum StepResult {
     Done { speakers: usize, took_s: f64 },
@@ -39,11 +50,7 @@ pub fn separate_speakers(store: &Store, cfg: &Config, id: &str) -> Result<StepRe
     let roster = speakers::roster(&segments, &store.speakers(id));
     store.replace_transcript(id, &segments)?;
     store.save_speakers(id, &roster)?;
-    store.update_meta(id, |m| {
-        if !m.steps_done.iter().any(|s| s == STEP_SPEAKERS) {
-            m.steps_done.push(STEP_SPEAKERS.into());
-        }
-    })?;
+    mark_done(store, id, STEP_SPEAKERS)?;
     Ok(StepResult::Done { speakers: roster.len(), took_s: t0.elapsed().as_secs_f64() })
 }
 

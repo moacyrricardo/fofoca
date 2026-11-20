@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 use crate::audio::{self, WavAppender, SAMPLE_RATE};
 use crate::capture::{Capture, CaptureStopper, Source, TrackBuffer};
 use crate::config::Config;
-use crate::llm::LlmClient;
+use crate::llm::{Completion, LlmClient};
+use crate::notes;
 use crate::model::{MeetingMeta, Pause, Segment, StartInfo, Summary, SummaryKind, Word};
 use crate::pipeline::{self, StepResult};
 use crate::prompts;
@@ -473,18 +474,43 @@ impl Worker {
         }
         self.set(Kind::Whisper, ModelState::Off);
         self.set(Kind::Llm, ModelState::Loading);
+        let mut grounded = None;
+        let mut fallback = None;
         let result = ModelServer::start(Kind::Llm, &self.cfg).and_then(|server| {
             self.set(Kind::Llm, ModelState::Busy);
-            let text = prompts::transcript_text(&self.segments, &self.speakers, &self.cfg.language);
-            let prompt = match kind {
-                SummaryKind::Partial => prompts::partial(&text, &self.cfg.language),
-                SummaryKind::Final => prompts::final_summary(&text, &self.cfg.language),
+            let lang = self.cfg.language.as_str();
+            let client = LlmClient::new(&server.base_url)?;
+            let text = prompts::transcript_text(&self.segments, &self.speakers, lang);
+            let out = match kind {
+                SummaryKind::Partial => client.complete(&prompts::partial(&text, lang), 350),
+                // Spec 005: checked notes with citations; plain summary only if extraction fails.
+                SummaryKind::Final => match notes::extract(&client, &self.segments, &self.speakers, &self.meeting, &self.cfg) {
+                    Ok(n) => {
+                        let c = Completion { text: notes::to_markdown(&n, lang), gen_tokens_per_s: n.gen_tokens_per_s };
+                        grounded = Some(n);
+                        Ok(c)
+                    }
+                    Err(e) => {
+                        fallback = Some(format!("{e:#}"));
+                        client.complete(&prompts::final_summary(&text, lang), 700)
+                    }
+                },
             };
-            let out = LlmClient::new(&server.base_url)?.complete(&prompt, if kind == SummaryKind::Final { 700 } else { 350 });
             server.stop();
             out
         });
         self.set(Kind::Llm, ModelState::Off);
+        if let Some(n) = grounded {
+            match self.store.save_notes(&self.meeting.id, &n) {
+                Ok(()) => {
+                    let _ = pipeline::mark_done(&self.store, &self.meeting.id, pipeline::STEP_NOTES);
+                }
+                Err(e) => self.error(format!("saving notes: {e:#}")),
+            }
+        }
+        if let Some(why) = fallback {
+            self.notice(&format!("Couldn't write checked notes ({why}); wrote a plain summary instead."));
+        }
         match result {
             Ok(c) => {
                 let summary = Summary {
