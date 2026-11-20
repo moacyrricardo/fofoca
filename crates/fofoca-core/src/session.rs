@@ -147,6 +147,7 @@ impl Session {
             offset_s: 0.0,
             pause_checked_at: 0,
             last_summary_at: 0.0,
+            aligned: false,
         };
         let handle = std::thread::Builder::new().name("session".into()).spawn(move || {
             worker.run(rx);
@@ -273,6 +274,8 @@ struct Worker {
     pause_checked_at: usize,
     /// Meeting time of the last "summary so far" (for the automatic cadence, spec 015).
     last_summary_at: f64,
+    /// The later capture's start was padded so both tracks share t = 0 (spec 018).
+    aligned: bool,
 }
 
 impl Worker {
@@ -380,6 +383,9 @@ impl Worker {
                 }
             }
 
+            if !self.aligned {
+                self.align_tracks();
+            }
             let available = self.mic.buffer.len().min(self.sys.buffer.len());
             let n = if available >= chunk {
                 let (m, s) = (self.mic.buffer.peek(chunk), self.sys.buffer.peek(chunk));
@@ -397,6 +403,7 @@ impl Worker {
                 0
             };
             if n > 0 {
+                self.aligned = true; // too late to pad once audio has been written
                 let m = self.mic.buffer.take(n);
                 let s = self.sys.buffer.take(n);
                 mic_wav.append(&m)?;
@@ -529,6 +536,24 @@ impl Worker {
             }
             self.segments.push(seg.clone());
             (self.emit)(SessionEvent::Segment { segment: seg });
+        }
+    }
+
+    /// Once both captures have delivered audio, pad the one that started later with that much
+    /// silence, so mic.wav and system.wav (and every chunk) start at the same moment (spec 018).
+    fn align_tracks(&mut self) {
+        let (mic, sys) = (&self.mic.buffer, &self.sys.buffer);
+        if mic.first_sample_at().is_none() || sys.first_sample_at().is_none() {
+            return;
+        }
+        self.aligned = true;
+        if let Some((late, n)) = crate::capture::start_lag(mic.first_sample_at(), sys.first_sample_at()) {
+            let (buffer, name) = match late {
+                Source::Microphone => (mic, "microphone"),
+                Source::SystemAudio => (sys, "call audio"),
+            };
+            buffer.pad_front(n);
+            eprintln!("fofoca: the {name} started {:.0} ms after the other track; padded its start", n as f64 * 1000.0 / SAMPLE_RATE as f64);
         }
     }
 
