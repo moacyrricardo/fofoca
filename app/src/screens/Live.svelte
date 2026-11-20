@@ -39,7 +39,8 @@
   });
 
   const s = $derived(live.status);
-  const swapping = $derived(live.summarizing || (s?.llm ?? "off") !== "off");
+  // the summary model may stay loaded ("ready") between summaries when it doesn't swap (spec 015)
+  const swapping = $derived(live.summarizing || s?.llm === "loading" || s?.llm === "busy");
 
   function bars(level: number): number[] {
     const l = Math.min(1, level * 14);
@@ -70,11 +71,27 @@
   }
 
   const paused = $derived(!!s?.paused);
+  // Spec 015: what runs during the call comes from Settings → Processing.
+  const wf = $derived(config?.config.workflow);
+  const recordOnly = $derived(!!wf && !wf.live_transcript);
+  const liveSummary = $derived(!wf || (wf.live_transcript && wf.live_summary));
+  const notesAfter = $derived(!wf || wf.notes_after);
+  const devices = $derived.by((): [string, string] => {
+    if (!wf) return ["GPU", "GPU"];
+    const d: Record<string, [string, string]> = { swap: ["GPU", "GPU"], gpu_both: ["GPU", "GPU"], gpu_transcript: ["GPU", "CPU"], gpu_summary: ["CPU", "GPU"], cpu: ["CPU", "CPU"] };
+    return liveSummary ? d[wf.layout] : [wf.live_device.toUpperCase(), wf.notes_device.toUpperCase()];
+  });
+  const swaps = $derived(liveSummary && wf?.layout === "swap");
   const chunkText = $derived.by(() => {
+    const u = wf?.updates ?? "custom";
+    if (u === "fast") return "8–15 s";
+    if (u === "balanced") return "8–30 s";
+    if (u === "light") return "30 s";
     const max = config?.config.chunk_seconds ?? 30;
     const min = config?.config.min_chunk_seconds ?? 0;
     return min > 0 && min < max ? `${min}–${max} s` : `${max} s`;
   });
+  const every = $derived(wf?.updates === "fast" ? 3 : wf?.updates === "balanced" ? 5 : wf?.updates === "custom" && wf.summary_every_s ? Math.round(wf.summary_every_s / 60) : 0);
   let toggling = $state(false);
   async function togglePause() {
     toggling = true;
@@ -121,20 +138,30 @@
       <span class="sp"></span>
       <button class="btn sm" class:ghost={!paused} class:teal={paused} onclick={togglePause} disabled={live.stopping || toggling} title={paused ? "Keep recording" : "Stop keeping audio until you resume"}>{paused ? "▶ Resume" : "❚❚ Pause"}</button>
       <button class="btn ghost sm" onclick={() => (confirmDiscard = true)} disabled={live.stopping} title="Stop and delete this recording">✕ Discard</button>
-      <button class="btn ghost sm" onclick={() => stop(false)} disabled={live.stopping} title="Stop and keep the transcript, without a summary">■ Stop, no summary</button>
-      <button class="btn rec" onclick={() => stop(true)} disabled={live.stopping}>■ Stop &amp; summarize</button>
+      {#if notesAfter}
+        <button class="btn ghost sm" onclick={() => stop(false)} disabled={live.stopping} title="Stop and keep the transcript, without a summary">■ Stop, no summary</button>
+        <button class="btn rec" onclick={() => stop(true)} disabled={live.stopping}>■ Stop &amp; summarize</button>
+      {:else}
+        <button class="btn rec" onclick={() => stop(false)} disabled={live.stopping} title="Checked notes are turned off in Settings → Processing">■ Stop</button>
+      {/if}
     </div>
 
-    <div class="grid">
+    <div class="grid" class:single={!liveSummary}>
       <div class="card tx" bind:this={txBox}>
         <div class="txhead">
-          <h2>Live transcript</h2>
-          <span class="chip gpu">Whisper · {label[s?.asr ?? "off"]}</span>
-          <span class="faint small">{config?.config.language ?? ""} · {chunkText} chunks</span>
+          <h2>{recordOnly ? "Recording only" : "Live transcript"}</h2>
+          {#if recordOnly}
+            <span class="chip">Whisper · after the call</span>
+          {:else}
+            <span class="chip" class:gpu={devices[0] === "GPU"} class:cpu={devices[0] === "CPU"}>Whisper · {devices[0]} · {label[s?.asr ?? "off"]}</span>
+            <span class="faint small">{config?.config.language ?? ""} · {chunkText} chunks</span>
+          {/if}
         </div>
-        {#if live.segments.length === 0}
+        {#if recordOnly}
+          <p class="faint empty">The live transcript is off in Settings → Processing, so the computer stays free during the call. The transcript is made when you stop.</p>
+        {:else if live.segments.length === 0}
           <p class="faint empty">
-            {#if (s?.asr ?? "off") === "loading"}Loading Whisper on the GPU…{:else}Listening — lines appear after each chunk ({chunkText}, cut at pauses in speech).{/if}
+            {#if (s?.asr ?? "off") === "loading"}Loading Whisper on the {devices[0]}…{:else}Listening — lines appear after each chunk ({chunkText}, cut at pauses in speech).{/if}
           </p>
         {/if}
         {#each live.segments as seg, i (i)}
@@ -148,27 +175,29 @@
         {#each pausesBefore(live.pauses, live.segments, live.segments.length) as p}<div class="pausemark">— paused at {mmss(p)} —</div>{/each}
       </div>
 
+      {#if liveSummary}
       <div class="card side">
         <div class="row between"><h2>Summary so far</h2><span class="faint small">{live.partial ? `up to ${mmss(live.partial.at_s)}` : "not yet"}</span></div>
         {#if swapping}
           <div class="swap">
             <span class="spin"></span>
             <div>
-              <b>{(s?.llm ?? "off") === "busy" ? "Writing summary…" : "Swapping models…"}</b>
-              <div class="faint small">Whisper paused · audio is buffered</div>
+              <b>{(s?.llm ?? "off") === "busy" ? "Writing summary…" : swaps ? "Swapping models…" : "Loading the summary model…"}</b>
+              <div class="faint small">{(s?.asr ?? "off") === "off" ? "Whisper paused · audio is buffered" : "Whisper keeps transcribing"}</div>
             </div>
           </div>
         {/if}
         <div class="sum md">
-          {#if live.partial}{@html markdown(live.partial.text)}{:else}<p class="faint">Press the button for a summary of what was said so far. It takes a few seconds to swap models on the GPU.</p>{/if}
+          {#if live.partial}{@html markdown(live.partial.text)}{:else}<p class="faint">{every ? `A summary of what was said so far is written every ${every} min, or when you press the button.` : "Press the button for a summary of what was said so far."}{swaps ? " It takes a few seconds to swap models on the GPU." : ""}</p>{/if}
         </div>
         <button class="btn teal sm" onclick={summarize} disabled={swapping || live.stopping}>↻ Update now</button>
         <div class="models">
-          <div class="m"><span>Speech → text</span><span class="chip" class:gpu={(s?.asr ?? "off") !== "off"}>{shortModel(config?.whisper_model)} · {label[s?.asr ?? "off"]}</span></div>
-          <div class="m"><span>Summaries</span><span class="chip" class:gpu={(s?.llm ?? "off") !== "off"}>{shortModel(config?.llm_model)} · {label[s?.llm ?? "off"]}</span></div>
+          <div class="m"><span>Speech → text</span><span class="chip" class:gpu={(s?.asr ?? "off") !== "off" && devices[0] === "GPU"} class:cpu={(s?.asr ?? "off") !== "off" && devices[0] === "CPU"}>{shortModel(config?.whisper_model)} · {devices[0]} · {label[s?.asr ?? "off"]}</span></div>
+          <div class="m"><span>Summaries</span><span class="chip" class:gpu={(s?.llm ?? "off") !== "off" && devices[1] === "GPU"} class:cpu={(s?.llm ?? "off") !== "off" && devices[1] === "CPU"}>{shortModel(config?.llm_model)} · {devices[1]} · {label[s?.llm ?? "off"]}</span></div>
           <div class="m"><span>Backlog</span><span class="faint">{(s?.backlog_s ?? 0).toFixed(0)} s of audio</span></div>
         </div>
       </div>
+      {/if}
     </div>
   {/if}
 </section>
@@ -205,6 +234,7 @@
   .meter.sys .bars i { background: var(--coral); }
   .sp { flex: 1; }
   .grid { display: grid; grid-template-columns: 1fr 330px; gap: 16px; flex: 1; min-height: 0; }
+  .grid.single { grid-template-columns: 1fr; }
   .tx { overflow: auto; padding-top: 0; }
   .txhead { position: sticky; top: 0; background: var(--navy-2); padding: 12px 0 8px; display: flex; align-items: center; gap: 10px; z-index: 1; }
   .txhead h2 { margin: 0; }

@@ -28,6 +28,21 @@ pub struct AudioTracks {
     pub call: Option<PathBuf>,
 }
 
+/// One action item with the meeting it came from (spec 016). Tasks have no labels of their own:
+/// they're filtered by their meeting's.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct TaskItem {
+    pub meeting_id: String,
+    pub meeting_title: String,
+    pub started_at: String,
+    pub labels: Vec<String>,
+    pub text: String,
+    pub owner: Option<String>,
+    /// `YYYY-MM-DD`.
+    pub due: Option<String>,
+    pub refs: Vec<f64>,
+}
+
 /// Serializes read-modify-write of meta.json files (UI commands and the session worker run on
 /// different threads).
 static META_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -208,6 +223,26 @@ impl Store {
         Ok(Meeting { meta, segments, summaries, speakers: self.speakers(id), notes })
     }
 
+    /// Every meeting's action items, newest meeting first (spec 016). Meetings without checked
+    /// notes are skipped.
+    pub fn tasks(&self) -> Result<Vec<TaskItem>> {
+        let mut out = Vec::new();
+        for m in self.list(None)? {
+            let Ok(notes) = read_json::<crate::grounding::Notes>(&self.dir(&m.id).join("notes.json")) else { continue };
+            out.extend(notes.action_items.into_iter().map(|a| TaskItem {
+                meeting_id: m.id.clone(),
+                meeting_title: m.title.clone(),
+                started_at: m.started_at.clone(),
+                labels: m.labels.clone(),
+                text: a.text,
+                owner: a.owner,
+                due: a.due,
+                refs: a.refs,
+            }));
+        }
+        Ok(out)
+    }
+
     /// All meetings (or only those carrying `label`), newest first. Folders without a readable
     /// meta.json are skipped.
     pub fn list(&self, label: Option<&str>) -> Result<Vec<MeetingMeta>> {
@@ -343,6 +378,27 @@ mod tests {
         for bad in ["", "..", "../outside", "/etc", "a/b", "nope"] {
             assert!(store.audio_tracks(bad).is_err(), "{bad:?} must be refused");
         }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn tasks_come_with_their_meeting_and_skip_meetings_without_notes() {
+        use crate::grounding::{Action, Notes};
+        let root = std::env::temp_dir().join(format!("fofoca-store-tasks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::new(&root).unwrap();
+        let a = store.create(&StartInfo { title: "Sync".into(), labels: vec!["Trabalho".into()], started_at: Some("2026-11-18T10:00:00-03:00".into()), ..Default::default() }).unwrap();
+        let _no_notes = store.create(&StartInfo { title: "Chat".into(), started_at: Some("2026-11-19T10:00:00-03:00".into()), ..Default::default() }).unwrap();
+        let notes = Notes {
+            summary: vec![], decisions: vec![], flagged: vec![], model: "m".into(), gen_tokens_per_s: 0.0,
+            action_items: vec![Action { text: "Enviar o follow-up".into(), owner: Some("Você".into()), due: Some("2026-11-19".into()), refs: vec![64.0] }],
+        };
+        store.save_notes(&a.id, &notes).unwrap();
+        let tasks = store.tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        let t = &tasks[0];
+        assert_eq!((t.meeting_id.as_str(), t.meeting_title.as_str(), t.labels.clone()), (a.id.as_str(), "Sync", vec!["trabalho".to_string()]));
+        assert_eq!((t.text.as_str(), t.owner.as_deref(), t.due.as_deref(), t.refs.clone()), ("Enviar o follow-up", Some("Você"), Some("2026-11-19"), vec![64.0]));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -1,4 +1,4 @@
-# 006 — Packaging: model servers, model downloads, AppImage
+# 006 — Packaging: model servers and AppImage (models come from 015)
 
 ## Context
 
@@ -9,8 +9,8 @@ Users need a single install that works.
 
 - Build **whisper.cpp** and **llama.cpp** from pinned tags with the Vulkan backend in CI
   (whisper.cpp ships no Linux Vulkan release), and bundle them as Tauri sidecars.
-- Download models on first run from Hugging Face with checksums and resumable transfers;
-  show size and progress; let the user pick a models folder.
+- **Models are not bundled or downloaded by 006**: the user picks or downloads them in Settings →
+  Models (spec 015). 006 may add sha256 checks and resumable transfers to that downloader.
 - Ship an **AppImage** first; Windows and macOS later (macOS: Metal; Windows: Vulkan/CUDA).
 
 ## Implementation
@@ -23,11 +23,8 @@ Users need a single install that works.
   libraries; `servers.rs` resolves the bundled path first, config path as override. onnxruntime
   for 003 ships via `ort`'s `download-binaries`/`copy-dylibs` (or is linked statically) — decide by
   AppImage size.
-- **Models** (`models.rs` + first-run screen): a catalog (`models.json`: name, URL on Hugging Face,
-  size, sha256, purpose) chosen by the 002 planner; downloads with HTTP `Range` resume, sha256
-  check, progress events, and a user-selectable models folder; nothing is downloaded without the
-  user pressing *Download* (sizes shown: turbo 574 MB, Qwen3.5-2B 1.18 GB, VAD 0.9 MB, diarization
-  ~34 MB).
+- **Models**: chosen and downloaded in Settings → Models (spec 015, `models.rs`); nothing ships
+  in the AppImage. Engines: "Use another…" in the same tab overrides the bundled sidecars.
 - **AppImage** via `cargo tauri build --bundles appimage`; the desktop entry and icon come from the
   bundle (replaces `scripts/install-dev-desktop-entry.sh` for installed builds). Smoke test in CI:
   start the AppImage headless with `--version`, and run `fofoca-cli transcribe` on the bundled

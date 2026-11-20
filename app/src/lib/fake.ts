@@ -1,7 +1,7 @@
 // Scripted stand-in for the Rust backend, used only outside Tauri (browser preview).
 
 import { normalizeLabels } from "./format";
-import type { JobEvent } from "./types";
+import type { DownloadEvent, JobEvent, ModelsView, Workflow, WorkflowView } from "./types";
 import type { CalendarEvent, CalendarSettings, ConfigView, Meeting, MeetingMeta, Segment, SessionEvent } from "./types";
 
 const LINES: [string, "you" | "call"][] = [
@@ -40,11 +40,18 @@ const meetings: Meeting[] = [
       { text: "A nova feature foi publicada na sexta, 15 de novembro, com feedback positivo.", refs: [48, 56] },
     ],
     decisions: [],
-    action_items: [{ text: "Enviar o follow-up por e-mail", owner: "Você", due: "2026-11-19", refs: [64] }],
+    action_items: [
+      { text: "Enviar o follow-up por e-mail", owner: "Você", due: "2026-11-19", refs: [64] },
+      { text: "Retomar o contato com o cliente de Belo Horizonte", owner: "Rodrigo Lima", due: "2026-11-27", refs: [16, 24] },
+    ],
     flagged: [{ section: "summary", text: "A diferença no orçamento foi de R$ 26.250.", reason: "26250 isn't said in the cited lines", refs: [40] }],
     model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2,
   }, segments: separated, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
-  { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true, labels: ["trabalho", "1:1"], calendar_uid: "1" }, segments: segs.slice(0, 3), summaries: [] },
+  { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true, labels: ["trabalho", "1:1"], calendar_uid: "1" }, segments: segs.slice(0, 3), summaries: [],
+    notes: { summary: [], decisions: [], flagged: [], model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2, action_items: [
+      { text: "Revisar os indicadores do trimestre antes da diretoria", owner: "Fernanda", due: "2026-11-21", refs: [8] },
+      { text: "Marcar a conversa sobre o orçamento", owner: null, due: null, refs: [0] },
+    ] } },
 ];
 
 const config: ConfigView = {
@@ -54,6 +61,7 @@ const config: ConfigView = {
   llm_model: "Qwen3.5-2B-Q4_K_M",
   config: {
     language: "pt", chunk_seconds: 30, min_chunk_seconds: 8,
+    workflow: { live_transcript: true, live_summary: true, layout: "swap", live_device: "gpu", updates: "balanced", summary_every_s: 300, speakers_after: true, notes_after: true, notes_device: "gpu" },
     whisper: { server: "~/.local/share/fofoca/bin/whisper/whisper-server", model: "~/.local/share/fofoca/models/ggml-large-v3-turbo-q5_0.bin", device: 0, threads: 4, vad_model: "~/.local/share/fofoca/models/ggml-silero-v5.1.2.bin" },
     llm: { server: "llama-server", model: "Qwen3.5-2B-Q4_K_M.gguf", device: "Vulkan1", context: 32768, threads: 4 },
   },
@@ -85,7 +93,27 @@ export function onSession(cb: (e: SessionEvent) => void): () => void {
 
 export async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   switch (cmd) {
-    case "get_config": return config as T;
+    case "list_tasks": return meetings.flatMap((m) => (m.notes?.action_items ?? []).map((t) => ({ meeting_id: m.meta.id, meeting_title: m.meta.title, started_at: m.meta.started_at, labels: m.meta.labels ?? [], ...t }))) as T;
+    case "get_config": return structuredClone(config) as T;
+    case "workflow_view": case "probe_hardware": return workflowView() as T;
+    case "set_workflow": config.config.workflow = args?.workflow as Workflow; return workflowView() as T;
+    case "models_view": return structuredClone(models) as T;
+    case "use_model": {
+      const row = models.tasks.find((t) => t.entries.some((e) => e.id === args?.id))!;
+      row.current = args?.id as string; row.found = true;
+      if (row.task === "llm") config.llm_model = row.entries.find((e) => e.id === args?.id)!.name;
+      return structuredClone(models) as T;
+    }
+    case "pick_model_file": return "/home/you/Downloads/gemma-3-1b-it-Q4_K_M.gguf" as T;
+    case "set_model_path": {
+      const row = models.tasks.find((t) => t.task === (args?.setting === "segmentation" || args?.setting === "embedding" ? "speakers" : args?.setting));
+      if (row) { row.paths = [args?.path as string]; row.current = null; row.found = true; }
+      const eng = models.engines.find((e) => e.setting === args?.setting);
+      if (eng) { eng.path = args?.path as string; eng.found = true; }
+      return structuredClone(models) as T;
+    }
+    case "download_model": fakeDownload(args?.id as string); return undefined as T;
+    case "cancel_download": cancelled.add(args?.id as string); return undefined as T;
     case "calendar_settings": return calSettings as T;
     case "upcoming_events":
       return { events: events.map((e) => ({ ...e, labels: normalizeLabels([...e.labels, ...(meetings.find((m) => m.meta.calendar_uid === e.uid)?.meta.labels ?? [])]) })), errors: [] } as T;
@@ -212,7 +240,7 @@ function startFake(title: string, labels: string[]): MeetingMeta {
   const meta = live;
   queueMicrotask(() => emit({ type: "started", meeting: meta }));
   timers.push(window.setInterval(() => emit(status(0, "ready", "off")), 250));
-  segs.forEach((s, i) => timers.push(window.setTimeout(() => emit({ type: "segment", segment: s }), 1500 + i * 1700)));
+  if (config.config.workflow?.live_transcript !== false) segs.forEach((s, i) => timers.push(window.setTimeout(() => emit({ type: "segment", segment: s }), 1500 + i * 1700)));
   return meta;
 }
 
@@ -245,4 +273,56 @@ export function audioTracks(id: string): { mic: string | null; call: string | nu
   if (!audioCache.has(key("call"))) audioCache.set(key("call"), tone(m.segments, (s) => (s.track === "call" ? voice(s) : null)));
   if (!m.meta.imported_from && !audioCache.has(key("mic"))) audioCache.set(key("mic"), tone(m.segments, (s) => (s.track === "you" ? 196 : null)));
   return { mic: m.meta.imported_from ? null : audioCache.get(key("mic"))!, call: audioCache.get(key("call"))! };
+}
+
+// Settings → Processing / Models (spec 015)
+function workflowView(): WorkflowView {
+  return {
+    workflow: structuredClone(config.config.workflow!), gpu: { device: "Vulkan1", name: "NVIDIA GeForce MX230", total_mib: 2294, free_mib: 2234 },
+    suggested: "swap", recording: !!live,
+    whisper: { name: config.whisper_model, footprint: { mib: 824, measured: true } },
+    llm: { name: config.llm_model, footprint: { mib: 1414, measured: true } },
+  };
+}
+const M = "~/.local/share/fofoca/models/";
+const models: ModelsView = {
+  dir: M,
+  tasks: [
+    { task: "whisper", paths: [M + "ggml-large-v3-turbo-q5_0.bin"], found: true, current: "whisper-turbo", entries: [
+      { id: "whisper-turbo", name: "Whisper large-v3-turbo · q5_0", note: "best for pt-BR (~2 % errors on the test recording)", bytes: 574041195, present: true, downloading: false },
+      { id: "whisper-small", name: "Whisper small · q5_1", note: "~3× faster, ~5× more errors in pt-BR", bytes: 190085487, present: false, downloading: false }] },
+    { task: "llm", paths: ["~/models/Qwen3.5-2B-Q4_K_M.gguf"], found: true, current: "qwen3.5-2b", entries: [
+      { id: "qwen3.5-2b", name: "Qwen3.5-2B · Q4_K_M", note: "~17 tokens/s on a 2 GB GPU", bytes: 1280835840, present: true, downloading: false },
+      { id: "qwen3-1.7b", name: "Qwen3-1.7B · Q4_K_M", note: "a bit faster, fits less context", bytes: 1107409472, present: false, downloading: false }] },
+    { task: "speakers", paths: [M + "segmentation-3.0.onnx", M + "wespeaker_en_voxceleb_CAM++.onnx"], found: false, current: "pyannote", entries: [
+      { id: "pyannote", name: "segmentation-3.0 + WeSpeaker CAM++", note: "runs on the CPU", bytes: 35276520, present: false, downloading: false }] },
+    { task: "vad", paths: [M + "ggml-silero-v5.1.2.bin"], found: true, current: "silero-vad", entries: [
+      { id: "silero-vad", name: "Silero VAD v5.1.2", note: "skips silence: no invented lines, faster chunks", bytes: 885098, present: true, downloading: false }] },
+  ],
+  engines: [
+    { setting: "whisper_server", path: "~/.local/share/fofoca/bin/whisper/whisper-server", found: true },
+    { setting: "llm_server", path: "~/llama.cpp/build/bin/llama-server", found: true },
+  ],
+};
+const downloadListeners: ((e: DownloadEvent) => void)[] = [];
+const cancelled = new Set<string>();
+export async function onDownload(cb: (e: DownloadEvent) => void): Promise<() => void> {
+  downloadListeners.push(cb);
+  return () => downloadListeners.splice(downloadListeners.indexOf(cb), 1);
+}
+function fakeDownload(id: string) {
+  const row = models.tasks.find((t) => t.entries.some((e) => e.id === id))!;
+  const entry = row.entries.find((e) => e.id === id)!;
+  entry.downloading = true;
+  cancelled.delete(id);
+  let done = 0;
+  const t = setInterval(() => {
+    const emit = (e: DownloadEvent) => downloadListeners.forEach((l) => l(e));
+    if (cancelled.has(id)) { clearInterval(t); entry.downloading = false; emit({ id, done: 0, total: entry.bytes, state: "cancelled" }); return; }
+    done = Math.min(entry.bytes, done + entry.bytes / 12);
+    if (done >= entry.bytes) {
+      clearInterval(t); entry.downloading = false; entry.present = true; row.current = id; row.found = true;
+      emit({ id, done, total: entry.bytes, state: "done" });
+    } else emit({ id, done, total: entry.bytes, state: "running" });
+  }, 250);
 }

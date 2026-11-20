@@ -1,6 +1,7 @@
 //! User configuration (`$XDG_CONFIG_HOME/fofoca/config.toml`).
 //!
-//! Spec 001 fixes the layout to "swap"; choosing models and devices automatically is spec 002.
+//! Which model runs each task and where (GPU/CPU) is chosen globally in Settings (spec 015);
+//! benchmarking the machine to suggest it is spec 002.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,140 @@ pub struct Config {
     pub diarization: DiarizationConfig,
     #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
+    pub workflow: Workflow,
+}
+
+/// GPU or CPU, for one model.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Device {
+    #[default]
+    Gpu,
+    Cpu,
+}
+
+/// Where speech-to-text and the summary model run during a call (spec 015).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout {
+    /// Both on the GPU, taking turns: Whisper is stopped while the summary model runs.
+    #[default]
+    Swap,
+    GpuTranscript,
+    GpuSummary,
+    Cpu,
+    /// Both loaded on the GPU at once (only when they fit).
+    GpuBoth,
+}
+
+impl Layout {
+    /// `(speech-to-text, summary)` devices.
+    pub fn devices(self) -> (Device, Device) {
+        match self {
+            Layout::Swap | Layout::GpuBoth => (Device::Gpu, Device::Gpu),
+            Layout::GpuTranscript => (Device::Gpu, Device::Cpu),
+            Layout::GpuSummary => (Device::Cpu, Device::Gpu),
+            Layout::Cpu => (Device::Cpu, Device::Cpu),
+        }
+    }
+    /// Whisper must give the GPU up while the summary model runs.
+    pub fn swaps(self) -> bool {
+        self == Layout::Swap
+    }
+}
+
+/// How fresh live text and the "summary so far" are, against how busy the computer is.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Updates {
+    Fast,
+    #[default]
+    Balanced,
+    Light,
+    /// The raw `chunk_seconds`, `min_chunk_seconds` and `workflow.summary_every_s`.
+    Custom,
+}
+
+/// What runs during and after a call (spec 015). Global: a recording uses the settings it started with.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct Workflow {
+    pub live_transcript: bool,
+    /// Needs `live_transcript`.
+    pub live_summary: bool,
+    pub layout: Layout,
+    /// Where the single live task runs when only the transcript is live.
+    pub live_device: Device,
+    pub updates: Updates,
+    /// Seconds between automatic summaries with `updates = "custom"`; 0 = only when asked.
+    pub summary_every_s: u32,
+    pub speakers_after: bool,
+    pub notes_after: bool,
+    pub notes_device: Device,
+}
+
+impl Default for Workflow {
+    fn default() -> Self {
+        Workflow {
+            live_transcript: true,
+            live_summary: true,
+            layout: Layout::Swap,
+            live_device: Device::Gpu,
+            updates: Updates::Balanced,
+            summary_every_s: 300,
+            speakers_after: true,
+            notes_after: true,
+            notes_device: Device::Gpu,
+        }
+    }
+}
+
+/// Chunking and summary cadence for a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pace {
+    /// End a chunk at the first pause after this many seconds (0 = full chunks only, spec 010).
+    pub min_chunk_s: u32,
+    pub chunk_s: u32,
+    /// Automatic "summary so far" interval; `None` = only when asked.
+    pub summary_every_s: Option<u32>,
+}
+
+impl Config {
+    /// Live summary only makes sense with a live transcript.
+    pub fn live_summary(&self) -> bool {
+        self.workflow.live_transcript && self.workflow.live_summary
+    }
+
+    /// `(speech-to-text, summary)` devices during a call.
+    pub fn live_devices(&self) -> (Device, Device) {
+        let w = &self.workflow;
+        if self.live_summary() {
+            w.layout.devices()
+        } else {
+            (w.live_device, w.notes_device)
+        }
+    }
+
+    /// Whisper has to give the GPU up while the summary model runs during the call.
+    pub fn live_swaps(&self) -> bool {
+        let (asr, llm) = self.live_devices();
+        asr == Device::Gpu && llm == Device::Gpu && !(self.live_summary() && self.workflow.layout == Layout::GpuBoth)
+    }
+
+    pub fn pace(&self) -> Pace {
+        let every = |s: u32| if self.live_summary() && s > 0 { Some(s) } else { None };
+        match self.workflow.updates {
+            Updates::Fast => Pace { min_chunk_s: 8, chunk_s: 15, summary_every_s: every(180) },
+            Updates::Balanced => Pace { min_chunk_s: 8, chunk_s: 30, summary_every_s: every(300) },
+            Updates::Light => Pace { min_chunk_s: 0, chunk_s: 30, summary_every_s: None },
+            Updates::Custom => Pace {
+                min_chunk_s: self.min_chunk_seconds,
+                chunk_s: self.chunk_seconds.max(5),
+                summary_every_s: every(self.workflow.summary_every_s),
+            },
+        }
+    }
 }
 
 /// How long meeting audio is kept (spec 011). Transcripts, notes and speakers are never deleted.
@@ -128,6 +263,7 @@ impl Default for Config {
             },
             diarization: DiarizationConfig::default(),
             audio: AudioConfig::default(),
+            workflow: Workflow::default(),
         }
     }
 }
@@ -185,6 +321,52 @@ impl Config {
         Ok(())
     }
 
+    /// Change the `[workflow]` table, keeping the rest of the file as written.
+    pub fn save_workflow(path: &Path, w: &Workflow) -> Result<()> {
+        edit_file(path, |doc| {
+            let table: toml_edit::DocumentMut = toml::to_string(w)?.parse()?;
+            doc["workflow"] = toml_edit::Item::Table(table.as_table().clone());
+            Ok(())
+        })
+    }
+
+    /// Point one model (or engine) setting at a file, keeping the rest of the file as written.
+    pub fn save_path(path: &Path, setting: ModelSetting, file: &Path) -> Result<()> {
+        let (table, key) = setting.key();
+        edit_file(path, |doc| {
+            if doc.get(table).is_none() {
+                doc[table] = toml_edit::table();
+            }
+            doc[table][key] = toml_edit::value(file.display().to_string());
+            Ok(())
+        })
+    }
+
+    /// The in-memory copy of a path setting.
+    pub fn set_path(&mut self, setting: ModelSetting, file: PathBuf) {
+        match setting {
+            ModelSetting::Whisper => self.whisper.model = file,
+            ModelSetting::Vad => self.whisper.vad_model = Some(file),
+            ModelSetting::Llm => self.llm.model = file,
+            ModelSetting::Segmentation => self.diarization.segmentation_model = file,
+            ModelSetting::Embedding => self.diarization.embedding_model = file,
+            ModelSetting::WhisperServer => self.whisper.server = file,
+            ModelSetting::LlmServer => self.llm.server = file,
+        }
+    }
+
+    pub fn path_of(&self, setting: ModelSetting) -> Option<&Path> {
+        Some(match setting {
+            ModelSetting::Whisper => &self.whisper.model,
+            ModelSetting::Vad => return self.whisper.vad_model.as_deref(),
+            ModelSetting::Llm => &self.llm.model,
+            ModelSetting::Segmentation => &self.diarization.segmentation_model,
+            ModelSetting::Embedding => &self.diarization.embedding_model,
+            ModelSetting::WhisperServer => &self.whisper.server,
+            ModelSetting::LlmServer => &self.llm.server,
+        })
+    }
+
     pub fn meetings_dir(&self) -> PathBuf {
         self.meetings_dir.clone().unwrap_or_else(|| data_dir().join("meetings"))
     }
@@ -208,6 +390,40 @@ impl Config {
     pub fn whisper_name(&self) -> String {
         model_name(&self.whisper.model)
     }
+}
+
+/// A file setting the Models tab can change (spec 015).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSetting {
+    Whisper,
+    Vad,
+    Llm,
+    Segmentation,
+    Embedding,
+    WhisperServer,
+    LlmServer,
+}
+
+impl ModelSetting {
+    fn key(self) -> (&'static str, &'static str) {
+        match self {
+            ModelSetting::Whisper => ("whisper", "model"),
+            ModelSetting::Vad => ("whisper", "vad_model"),
+            ModelSetting::Llm => ("llm", "model"),
+            ModelSetting::Segmentation => ("diarization", "segmentation_model"),
+            ModelSetting::Embedding => ("diarization", "embedding_model"),
+            ModelSetting::WhisperServer => ("whisper", "server"),
+            ModelSetting::LlmServer => ("llm", "server"),
+        }
+    }
+}
+
+fn edit_file(path: &Path, f: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>) -> Result<()> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text.parse().with_context(|| format!("parsing {}", path.display()))?;
+    f(&mut doc)?;
+    std::fs::write(path, doc.to_string()).with_context(|| format!("writing {}", path.display()))
 }
 
 fn model_name(p: &Path) -> String {
@@ -257,5 +473,45 @@ mod tests {
         let cfg = Config::load_or_create_at(&path).unwrap();
         assert_eq!(cfg.audio, AudioConfig { keep: KeepAudio::Days, keep_days: 7 });
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn workflow_defaults_pace_and_save() {
+        let dir = std::env::temp_dir().join(format!("fofoca-cfg-wf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // an older file without [workflow] reads as today's behaviour
+        Config::load_or_create_at(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let old: String = text.split("[workflow]").next().unwrap().to_string();
+        std::fs::write(&path, format!("# keep me\n{old}")).unwrap();
+        let cfg = Config::load_or_create_at(&path).unwrap();
+        assert_eq!(cfg.workflow, Workflow::default());
+        assert_eq!(cfg.pace(), Pace { min_chunk_s: 8, chunk_s: 30, summary_every_s: Some(300) });
+        assert_eq!(cfg.live_devices(), (Device::Gpu, Device::Gpu));
+
+        let w = Workflow { live_summary: false, live_device: Device::Cpu, updates: Updates::Light, notes_device: Device::Cpu, ..Workflow::default() };
+        Config::save_workflow(&path, &w).unwrap();
+        Config::save_path(&path, ModelSetting::Segmentation, Path::new("/m/seg.onnx")).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.starts_with("# keep me"), "{saved}");
+        let cfg = Config::load_or_create_at(&path).unwrap();
+        assert_eq!(cfg.workflow, w);
+        assert_eq!(cfg.diarization.segmentation_model, PathBuf::from("/m/seg.onnx"));
+        assert_eq!(cfg.pace().summary_every_s, None);
+        assert_eq!(cfg.live_devices(), (Device::Cpu, Device::Cpu));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn live_summary_needs_the_transcript() {
+        let mut cfg = Config::default();
+        cfg.workflow.live_transcript = false;
+        assert!(!cfg.live_summary());
+        assert_eq!(cfg.pace().summary_every_s, None);
+        cfg.workflow = Workflow { layout: Layout::GpuTranscript, updates: Updates::Fast, ..Workflow::default() };
+        assert_eq!(cfg.live_devices(), (Device::Gpu, Device::Cpu));
+        assert!(!cfg.workflow.layout.swaps());
+        assert_eq!(cfg.pace(), Pace { min_chunk_s: 8, chunk_s: 15, summary_every_s: Some(180) });
     }
 }

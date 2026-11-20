@@ -1,4 +1,4 @@
-//! A live recording session (spec 001, "swap" layout).
+//! A live recording session (spec 001; layouts, pacing and record-only from spec 015).
 //!
 //! ```text
 //! pw-record mic ─┐                      ┌─ mic.wav / system.wav
@@ -8,7 +8,9 @@
 //! ```
 //!
 //! Capture never stops while models swap: audio piles up in the track buffers (the backlog) and
-//! is transcribed once Whisper is back.
+//! is transcribed once Whisper is back. Other layouts (spec 015) run Whisper and/or the summary
+//! model on the CPU, or both on the GPU at once, and then nothing is swapped. With the live
+//! transcript off ("record only") the audio is only written, and transcribed after the call.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -20,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use crate::audio::{self, WavAppender, SAMPLE_RATE};
 use crate::capture::{Capture, CaptureStopper, Source, TrackBuffer};
-use crate::config::Config;
+use crate::config::{Config, Device};
 use crate::llm::{Completion, LlmClient};
 use crate::notes;
 use crate::model::{MeetingMeta, Pause, Segment, StartInfo, Summary, SummaryKind, Word};
@@ -128,11 +130,13 @@ impl Session {
             mic,
             sys,
             asr: None,
+            llm: None,
             segments: Vec::new(),
             speakers: Default::default(),
             post_ok: true,
             offset_s: 0.0,
             pause_checked_at: 0,
+            last_summary_at: 0.0,
         };
         let handle = std::thread::Builder::new().name("session".into()).spawn(move || {
             worker.run(rx);
@@ -244,6 +248,9 @@ struct Worker {
     mic: Capture,
     sys: Capture,
     asr: Option<(ModelServer, WhisperClient)>,
+    /// The summary model, kept loaded between summaries when it doesn't have to make room for
+    /// Whisper (spec 015: loading it on the CPU takes ~1 min from disk).
+    llm: Option<(ModelServer, Device)>,
     segments: Vec<Segment>,
     /// Every post-call step that needs the audio succeeded (spec 011).
     post_ok: bool,
@@ -253,12 +260,15 @@ struct Worker {
     offset_s: f64,
     /// Buffer length when we last looked for a pause to cut at (avoid rescanning every 100 ms).
     pause_checked_at: usize,
+    /// Meeting time of the last "summary so far" (for the automatic cadence, spec 015).
+    last_summary_at: f64,
 }
 
 impl Worker {
     fn run(&mut self, rx: Receiver<Command>) {
         let result = self.run_inner(rx);
         self.asr = None;
+        self.llm = None;
         self.set(Kind::Whisper, ModelState::Off);
         self.shared.running.store(false, Ordering::Relaxed);
         let discarded = match result {
@@ -307,13 +317,17 @@ impl Worker {
     fn run_inner(&mut self, rx: Receiver<Command>) -> Result<Outcome> {
         let mut mic_wav = WavAppender::create(&self.dir.join("mic.wav"))?;
         let mut sys_wav = WavAppender::create(&self.dir.join("system.wav"))?;
-        self.start_asr();
-        let chunk = (self.cfg.chunk_seconds.max(5) * SAMPLE_RATE) as usize;
+        let live = self.cfg.workflow.live_transcript;
+        let pace = self.cfg.pace();
+        if live {
+            self.start_asr();
+        }
+        let chunk = (pace.chunk_s.max(5) * SAMPLE_RATE) as usize;
         let mut stopping = false;
         let mut final_summary = true;
         let mut pending_summary = false;
         let mut flush = false;
-        let min_chunk = (self.cfg.min_chunk_seconds * SAMPLE_RATE) as usize;
+        let min_chunk = (pace.min_chunk_s * SAMPLE_RATE) as usize;
 
         loop {
             while let Ok(cmd) = rx.try_recv() {
@@ -377,14 +391,25 @@ impl Worker {
                 mic_wav.append(&m)?;
                 sys_wav.append(&s)?;
                 self.pause_checked_at = 0;
-                self.transcribe_chunk(&m, &s);
+                if live {
+                    self.transcribe_chunk(&m, &s);
+                } else {
+                    self.offset_s += m.len().max(s.len()) as f64 / SAMPLE_RATE as f64;
+                }
                 continue; // drain the backlog before anything else
             }
             if stopping {
                 break;
             }
+            if let Some(every) = pace.summary_every_s {
+                // automatic "summary so far" (spec 015) — only once there's something to summarize
+                if self.offset_s - self.last_summary_at >= every as f64 && self.word_count() >= MIN_WORDS_TO_SUMMARIZE {
+                    pending_summary = true;
+                }
+            }
             if pending_summary {
                 pending_summary = false;
+                self.last_summary_at = self.offset_s;
                 self.summarize(SummaryKind::Partial);
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -392,10 +417,15 @@ impl Worker {
 
         mic_wav.finish()?;
         sys_wav.finish()?;
+        if !live {
+            self.transcribe_recording(chunk)?;
+        }
         // Whisper isn't needed any more; free the GPU before the CPU and summary steps.
         self.asr = None;
         self.set(Kind::Whisper, ModelState::Off);
-        if !self.segments.is_empty() {
+        if !self.cfg.workflow.speakers_after {
+            // turned off in Settings (spec 015)
+        } else if !self.segments.is_empty() {
             (self.emit)(SessionEvent::Step { step: pipeline::STEP_SPEAKERS.into() });
             match pipeline::separate_speakers(&self.store, &self.cfg, &self.meeting.id) {
                 Ok(StepResult::Done { .. }) => match self.store.load(&self.meeting.id) {
@@ -415,8 +445,8 @@ impl Worker {
                 }
             }
         }
-        if !final_summary {
-            // the user chose to stop without a summary
+        if !final_summary || !self.cfg.workflow.notes_after {
+            // the user stopped without a summary, or turned notes off in Settings
         } else if self.word_count() >= MIN_WORDS_TO_SUMMARIZE {
             (self.emit)(SessionEvent::Step { step: "summarizing".into() });
             self.summarize(SummaryKind::Final);
@@ -425,6 +455,25 @@ impl Worker {
         }
         (self.emit)(SessionEvent::Step { step: "saving".into() });
         Ok(Outcome::Finished)
+    }
+
+    /// Record-only mode (spec 015): transcribe the saved tracks after the call, in the same
+    /// quiet-point chunks a live session uses, so You/Call attribution works the same way.
+    fn transcribe_recording(&mut self, chunk: usize) -> Result<()> {
+        let mic = audio::read_wav(&self.dir.join("mic.wav"))?;
+        let sys = audio::read_wav(&self.dir.join("system.wav"))?;
+        let total = mic.len().max(sys.len());
+        self.offset_s = 0.0;
+        let mut pos = 0;
+        while pos < total {
+            let (m, s) = (&mic[pos.min(mic.len())..], &sys[pos.min(sys.len())..]);
+            let (m, s) = (&m[..m.len().min(chunk + 1)], &s[..s.len().min(chunk + 1)]);
+            let n = audio::quiet_cut(m, s, chunk, 3 * SAMPLE_RATE as usize).max(1).min(total - pos);
+            self.transcribe_chunk(&m[..n.min(m.len())], &s[..n.min(s.len())]);
+            pos += n;
+        }
+        self.offset_s = total as f64 / SAMPLE_RATE as f64;
+        Ok(())
     }
 
     fn transcribe_chunk(&mut self, mic: &[i16], sys: &[i16]) {
@@ -491,14 +540,27 @@ impl Worker {
             self.notice("Not enough has been said yet to summarize.");
             return;
         }
-        if let Some((server, _)) = self.asr.take() {
-            server.stop();
+        // Spec 015: Whisper gives the GPU up only when both models need it and don't share it.
+        let swapped = kind == SummaryKind::Final || self.cfg.live_swaps();
+        if swapped {
+            if let Some((server, _)) = self.asr.take() {
+                server.stop();
+            }
+            self.set(Kind::Whisper, ModelState::Off);
         }
-        self.set(Kind::Whisper, ModelState::Off);
+        let device = if kind == SummaryKind::Final { self.cfg.workflow.notes_device } else { self.cfg.live_devices().1 };
         self.set(Kind::Llm, ModelState::Loading);
         let mut grounded = None;
         let mut fallback = None;
-        let result = ModelServer::start(Kind::Llm, &self.cfg).and_then(|server| {
+        let server = match self.llm.take() {
+            Some((s, d)) if d == device => Ok(s),
+            other => {
+                drop(other); // a different device: stop it before loading again
+                ModelServer::start(Kind::Llm, &self.cfg, device)
+            }
+        };
+        let mut keep = None;
+        let result = server.and_then(|server| {
             self.set(Kind::Llm, ModelState::Busy);
             let lang = self.cfg.language.as_str();
             let client = LlmClient::new(&server.base_url)?;
@@ -518,10 +580,16 @@ impl Worker {
                     }
                 },
             };
-            server.stop();
+            if kind == SummaryKind::Partial && !swapped {
+                keep = Some(server);
+            } else {
+                server.stop();
+            }
             out
         });
-        self.set(Kind::Llm, ModelState::Off);
+        let kept = keep.is_some();
+        self.llm = keep.map(|s| (s, device));
+        self.set(Kind::Llm, if kept { ModelState::Ready } else { ModelState::Off });
         if let Some(n) = grounded {
             match self.store.save_notes(&self.meeting.id, &n) {
                 Ok(()) => {
@@ -552,14 +620,14 @@ impl Worker {
             }
             Err(e) => self.error(format!("summary failed: {e:#}")),
         }
-        if kind == SummaryKind::Partial {
+        if kind == SummaryKind::Partial && swapped && self.cfg.workflow.live_transcript {
             self.start_asr();
         }
     }
 
     fn start_asr(&mut self) {
         self.set(Kind::Whisper, ModelState::Loading);
-        match ModelServer::start(Kind::Whisper, &self.cfg).and_then(|s| {
+        match ModelServer::start(Kind::Whisper, &self.cfg, self.cfg.live_devices().0).and_then(|s| {
             let c = WhisperClient::new(&s.base_url)?;
             Ok((s, c))
         }) {

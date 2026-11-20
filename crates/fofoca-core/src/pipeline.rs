@@ -62,7 +62,7 @@ pub fn transcribe_samples(cfg: &Config, samples: &[i16], hooks: &Hooks) -> Resul
             hooks.wait_for_gpu();
         }
         if asr.is_none() {
-            let server = ModelServer::start(Kind::Whisper, cfg)?;
+            let server = ModelServer::start(Kind::Whisper, cfg, cfg.live_devices().0)?;
             let client = WhisperClient::new(&server.base_url)?;
             asr = Some((server, client));
         }
@@ -105,14 +105,17 @@ pub fn run_import(store: &Store, cfg: &Config, id: &str, src: &std::path::Path, 
     store.update_meta(id, |m| m.duration_s = duration)?;
     mark_done(store, id, STEP_TRANSCRIBE)?;
 
+    // `processed` = every step turned on in Settings succeeded (spec 015)
     let mut ok = true;
-    (hooks.progress)(STEP_SPEAKERS, 0.0);
-    match separate_speakers(store, cfg, id) {
-        Ok(StepResult::Done { .. }) => {}
-        Ok(StepResult::Skipped(_)) | Err(_) => ok = false,
+    if cfg.workflow.speakers_after {
+        (hooks.progress)(STEP_SPEAKERS, 0.0);
+        match separate_speakers(store, cfg, id) {
+            Ok(StepResult::Done { .. }) => {}
+            Ok(StepResult::Skipped(_)) | Err(_) => ok = false,
+        }
     }
     let words: usize = segments.iter().map(|s| s.text.split_whitespace().count()).sum();
-    if words >= crate::session::MIN_WORDS_TO_SUMMARIZE {
+    if cfg.workflow.notes_after && words >= crate::session::MIN_WORDS_TO_SUMMARIZE {
         (hooks.progress)(STEP_NOTES, 0.0);
         hooks.wait_for_gpu();
         // a failure here keeps the transcript and speakers; the notes can be written again later
@@ -133,7 +136,7 @@ pub fn write_notes(store: &Store, cfg: &Config, id: &str) -> Result<()> {
     use crate::model::{Summary, SummaryKind};
     use crate::servers::{Kind, ModelServer};
     let m = store.load(id)?;
-    let server = ModelServer::start(Kind::Llm, cfg)?;
+    let server = ModelServer::start(Kind::Llm, cfg, cfg.workflow.notes_device)?;
     let n = crate::notes::extract(&crate::llm::LlmClient::new(&server.base_url)?, &m.segments, &m.speakers, &m.meta, cfg)?;
     drop(server);
     store.save_notes(id, &n)?;
