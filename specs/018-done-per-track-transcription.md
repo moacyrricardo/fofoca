@@ -16,9 +16,10 @@ call (2026-11-20; the numbers come from per-second loudness of the two WAVs, and
 copied):
 
 - **78 lines were labelled Call and 19 You**, although the two people were taking turns.
-- 00:00 "E aí Vini, tudo bem?" has the call at 0–2 s and you at 2–3 s, and was labelled Call.
-- 00:29 "Sim, você tinha falado mesmo. Cara, eu tinha esquecido." has you at 29–30 s and the call
-  at 31–32 s. The mic was 0.84× the call (it needed 1.2×), so the line was labelled Call.
+- The first line (a greeting and its answer) has the call at 0–2 s and you at 2–3 s, and was
+  labelled Call.
+- The line at 00:29 (your reply and theirs) has you at 29–30 s and the call at 31–32 s. The mic
+  was 0.84× the call (it needed 1.2×), so the line was labelled Call.
 - The audio itself is clean. In the seconds where you speak, the mic is 30–800× louder than the
   call, and your voice is not in `system.wav`. **The channels are already separate. The
   transcription throws that away.**

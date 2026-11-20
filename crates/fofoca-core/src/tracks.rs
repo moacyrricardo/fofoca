@@ -204,7 +204,7 @@ mod tests {
 
         let parts = with_speech(&mic, &sys);
         assert_eq!(parts.iter().map(|p| p.0).collect::<Vec<_>>(), vec![Track::You, Track::Call], "mic first, then call");
-        let (you, call) = (fake_whisper("tudo bem?"), fake_whisper("E aí Vini,"));
+        let (you, call) = (fake_whisper("tudo certo?"), fake_whisper("Oi, como vai?"));
         let mut sent = Vec::new();
         let out = transcribe_parts(&parts, 60.0, |s| {
             sent.push(s.len());
@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert!(out.errors.is_empty());
         let lines: Vec<(Track, &str, f64)> = out.segments.iter().map(|s| (s.track, s.text.as_str(), s.start)).collect();
-        assert_eq!(lines, vec![(Track::Call, "E aí Vini,", 60.0), (Track::You, "tudo bem?", 62.0)]);
+        assert_eq!(lines, vec![(Track::Call, "Oi, como vai?", 60.0), (Track::You, "tudo certo?", 62.0)]);
         assert!(out.segments[1].words.iter().all(|w| w.start >= 62.0), "words move to meeting time too");
     }
 
@@ -241,8 +241,8 @@ mod tests {
     #[test]
     fn merge_orders_both_tracks_by_start() {
         // a turn-taking chunk: the call speaks first, you answer, the call again
-        let call = vec![line(Track::Call, 0.0, 2.0, "E aí Vini,"), line(Track::Call, 3.1, 5.0, "tudo certo por aí?")];
-        let mic = vec![line(Track::You, 2.0, 3.0, "tudo bem?"), line(Track::You, 5.2, 6.0, "tudo")];
+        let call = vec![line(Track::Call, 0.0, 2.0, "Oi, como vai?"), line(Track::Call, 3.1, 5.0, "tudo certo por aí?")];
+        let mic = vec![line(Track::You, 2.0, 3.0, "tudo certo?"), line(Track::You, 5.2, 6.0, "tudo")];
         let (merged, dropped) = merge(mic, call);
         assert_eq!(dropped, 0);
         let order: Vec<(Track, f64)> = merged.iter().map(|s| (s.track, s.start)).collect();

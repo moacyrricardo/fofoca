@@ -369,10 +369,10 @@ mod tests {
         let meta = store.create(&StartInfo::default()).unwrap();
         let line = |t: f64, track: Track, text: &str| Segment { start: t, end: t + 1.0, text: text.into(), track, words: vec![], speaker: None };
         // live: one mixed line, labelled Call by the old loudness guess
-        store.append_segment(&meta.id, &line(0.0, Track::Call, "E aí Vini, tudo bem?")).unwrap();
+        store.append_segment(&meta.id, &line(0.0, Track::Call, "Oi, como vai?")).unwrap();
         assert_eq!(store.base_transcript(&meta.id).unwrap().len(), 1, "no rebuild yet: the live one");
 
-        let rebuilt = vec![line(0.0, Track::Call, "E aí Vini,"), line(2.0, Track::You, "tudo bem?")];
+        let rebuilt = vec![line(0.0, Track::Call, "Oi, como vai?"), line(2.0, Track::You, "tudo certo?")];
         store.rebuild_transcript(&meta.id, &rebuilt).unwrap();
         assert_eq!(store.load(&meta.id).unwrap().segments, rebuilt);
         assert_eq!(store.base_transcript(&meta.id).unwrap(), rebuilt);
