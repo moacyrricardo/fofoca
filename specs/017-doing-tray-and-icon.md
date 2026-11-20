@@ -1,3 +1,6 @@
+Status: doing
+Branch: moacyrricardo/spec-017-tray-and-icon-build
+
 # 017 — Tray menu, and an icon without white corners
 
 ## Context
