@@ -1,3 +1,6 @@
+Status: done
+Branch: moacyrricardo/spec-003-speaker-separation
+
 # 003 — Speaker separation after the call
 
 ## Context
@@ -74,3 +77,40 @@ pipeline steps instead of today's fixed three.
 
 - Live (during-call) separation is out of scope.
 - Overlapping speech is attributed to a single speaker.
+
+## Implementation Notes
+
+- **No pyannote-rs dependency.** Its fbank crate (`knf-rs-sys`) builds C++ with cmake + bindgen
+  (libclang); neither is on the baseline laptop, and the AppImage build (006) is simpler without a
+  C++ toolchain. Its ONNX handling (MIT) is ported in `diarize.rs` onto **`ort` 2.0.0-rc.10**
+  (prebuilt ONNX Runtime downloaded at build time) and **`kaldi-fbank`** (pure-Rust port of
+  kaldi-native-fbank; same options: 80 bins, no dither, snip edges, mean-normalized). The
+  `diarize::separate` surface is what the spec asked for, so sherpa-onnx can still replace it.
+- Two changes from pyannote-rs: turns are split where the segmentation's **speaker class changes**
+  (pyannote-rs only splits at silence, so two people talking back to back became one turn;
+  changes shorter than 0.4 s are merged), and clustering is **offline average linkage** over all
+  turns (cosine ≥ 0.5) instead of online first-come matching. Turns under 0.8 s get no embedding and
+  take their nearest identified neighbour's voice.
+- Models: `segmentation-3.0.onnx` (5.98 MB, sha256 `b78fc481…`) and
+  `wespeaker_en_voxceleb_CAM++.onnx` (29.3 MB, sha256 `c46fad10…`) from the pyannote-rs v0.1.0
+  release, in `~/.local/share/fofoca/models/`; config `[diarization]`. Missing models → the step is
+  skipped with a notice. Downloads come with 006.
+- **Speed**: pyannote-rs' 40.7 s `6_speakers.wav` in 1.2 s on the i7-10510U **in a debug build**
+  (0.03× real time) — far under the 3 min/hour budget. Similarities between turns: same voice
+  0.82–0.94, different voices 0.18–0.56. It finds 4 voices; the 2 others only have turns under
+  0.8 s. The sample has no reference labels, so this is a sanity check, not an accuracy number.
+- **Not measured**: word-boundary accuracy against a hand-labelled pt-BR multi-speaker recording
+  (none exists yet), so the precise-words pass (`verbose_json` / `--dtw`) and the
+  `diarization.precise_words` setting were **not built**. Words keep the interpolated timings from
+  001; a line is split only where at least 2 words change voice. Revisit with a real call.
+- The session frees Whisper's VRAM before the speakers step, then runs the final summary with
+  speaker names in the prompt (`[mm:ss] Fernanda: …`).
+- The pipeline module holds the speakers step only; the final summary still runs in the session
+  and moves to `pipeline.rs` with 005 as planned.
+- `max_speakers = max(attendees + 1, 4)`; re-running keeps names by key (`s1`, `s2`, …), which
+  can attach a name to a different voice if clustering changes — the Speakers tab shows sample
+  lines so it's visible.
+- Tests: assignment/splitting, gap filling, roster, display names, region building, clustering,
+  store round trip; `pipeline::tests::speakers_step_on_a_real_recording` (ignored by default,
+  runs the real models on a WAV given in `FOFOCA_DIAR_WAV`) passed on the six-speaker sample.
+- UI checked in the browser preview (Speakers tab, named transcript). Not yet tried on a real call.
