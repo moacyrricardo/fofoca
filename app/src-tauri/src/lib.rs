@@ -159,6 +159,13 @@ fn delete_audio(state: State<AppState>, id: String) -> CmdResult<Meeting> {
     state.store.load(&id).map_err(err)
 }
 
+/// The meeting's audio files that exist, for replay (spec 014). The webview loads them through
+/// the asset protocol, whose scope is the meetings folder only.
+#[tauri::command]
+fn audio_tracks(state: State<AppState>, id: String) -> CmdResult<fofoca_core::store::AudioTracks> {
+    state.store.audio_tracks(&id).map_err(err)
+}
+
 #[derive(Serialize)]
 struct StorageView {
     audio: fofoca_core::config::AudioConfig,
@@ -436,6 +443,8 @@ pub fn run() {
                     let _ = handle.emit("job", &e);
                 }),
             );
+            // Replay (spec 014): the webview may stream audio from the meetings folder — nothing else.
+            app.asset_protocol_scope().allow_directory(store.root(), true)?;
             app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), calendars, upcoming: Mutex::new(None), jobs });
             // Embedded so the window has the seal icon even when no .desktop entry is installed
             // (X11/XWayland). GNOME on Wayland takes the icon from the desktop entry instead —
@@ -456,6 +465,7 @@ pub fn run() {
             write_notes,
             set_keep_audio,
             delete_audio,
+            audio_tracks,
             storage,
             set_audio_policy,
             pick_recording,

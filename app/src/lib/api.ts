@@ -3,6 +3,7 @@
 
 import type { AudioConfig, JobEvent, StorageView, CalendarSettings, CalendarSource, ConfigView, LabelCount, Meeting, MeetingMeta, SessionEvent, Upcoming } from "./types";
 import * as fake from "./fake";
+import type { TrackUrls } from "./player.svelte";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -24,6 +25,13 @@ export const api = {
   writeNotes: (id: string) => call<Meeting>("write_notes", { id }),
   setKeepAudio: (id: string, keep: boolean) => call<Meeting>("set_keep_audio", { id, keep }),
   deleteAudio: (id: string) => call<Meeting>("delete_audio", { id }),
+  /** Playable URLs of the meeting's audio files that still exist (spec 014). */
+  audioTracks: async (id: string): Promise<TrackUrls> => {
+    if (!inTauri) return fake.audioTracks(id);
+    const { convertFileSrc } = await import("@tauri-apps/api/core");
+    const t = await call<{ mic: string | null; call: string | null }>("audio_tracks", { id });
+    return { mic: t.mic && convertFileSrc(t.mic), call: t.call && convertFileSrc(t.call) };
+  },
   storage: () => call<StorageView>("storage"),
   pickRecording: () => call<string | null>("pick_recording"),
   importRecording: (path: string, title: string | null = null, labels: string[] = []) => call<MeetingMeta>("import_recording", { path, title, labels }),

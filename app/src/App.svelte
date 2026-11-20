@@ -260,8 +260,8 @@
 {/if}
 
 <style>
-  .app { display: flex; height: 100%; }
-  .side { width: 212px; background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 16px 12px; gap: 4px; flex: none; }
+  .app { display: flex; height: 100%; --side-w: 212px; }
+  .side { width: var(--side-w); background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 16px 12px; gap: 4px; flex: none; }
   .brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 16px; }
   .brand img { width: 38px; height: 38px; border-radius: 10px; }
   .brand b { font-size: 20px; }

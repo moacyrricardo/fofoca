@@ -20,6 +20,14 @@ use crate::labels;
 use crate::model::{Meeting, MeetingMeta, Segment, SpeakerInfo, StartInfo, Summary};
 use std::collections::BTreeMap;
 
+/// A meeting's audio files on disk (spec 014); `None` when that track doesn't exist (imports have
+/// no mic track; retention may have deleted both).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AudioTracks {
+    pub mic: Option<PathBuf>,
+    pub call: Option<PathBuf>,
+}
+
 /// Serializes read-modify-write of meta.json files (UI commands and the session worker run on
 /// different threads).
 static META_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -179,6 +187,17 @@ impl Store {
         write_json(&path, &all)
     }
 
+    /// The meeting's audio files that exist, for replay (spec 014). Refuses anything that isn't a
+    /// plain meeting folder name, so the UI can't be talked into serving other files.
+    pub fn audio_tracks(&self, id: &str) -> Result<AudioTracks> {
+        let plain = !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        anyhow::ensure!(plain, "not a meeting id: {id:?}");
+        let dir = self.dir(id);
+        anyhow::ensure!(dir.join("meta.json").is_file(), "no meeting {id}");
+        let file = |name: &str| Some(dir.join(name)).filter(|p| p.is_file());
+        Ok(AudioTracks { mic: file("mic.wav"), call: file("system.wav") })
+    }
+
     pub fn load(&self, id: &str) -> Result<Meeting> {
         let dir = self.dir(id);
         let meta: MeetingMeta = read_json(&dir.join("meta.json"))?;
@@ -303,6 +322,27 @@ mod tests {
         store.update_meta(&new.id, |m| m.started_at = "2026-11-08T10:00:00-03:00".into()).unwrap();
         assert_eq!(store.labels_for_series("weekly@x").unwrap(), vec!["1:1", "fernanda"]);
         assert_eq!(store.load(&new.id).unwrap().meta.calendar_uid.as_deref(), Some("weekly@x"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn audio_tracks_lists_existing_files_and_refuses_other_ids() {
+        let root = std::env::temp_dir().join(format!("fofoca-store-audio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::new(root.join("meetings")).unwrap();
+        let meta = store.create(&StartInfo::default()).unwrap();
+        assert_eq!(store.audio_tracks(&meta.id).unwrap(), AudioTracks { mic: None, call: None });
+        std::fs::write(store.dir(&meta.id).join("system.wav"), b"RIFF").unwrap();
+        let t = store.audio_tracks(&meta.id).unwrap();
+        assert_eq!((t.mic, t.call), (None, Some(store.dir(&meta.id).join("system.wav"))));
+        std::fs::write(store.dir(&meta.id).join("mic.wav"), b"RIFF").unwrap();
+        assert!(store.audio_tracks(&meta.id).unwrap().mic.is_some());
+        // a folder outside the store, even one that looks like a meeting
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(root.join("outside/meta.json"), b"{}").unwrap();
+        for bad in ["", "..", "../outside", "/etc", "a/b", "nope"] {
+            assert!(store.audio_tracks(bad).is_err(), "{bad:?} must be refused");
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

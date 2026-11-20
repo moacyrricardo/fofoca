@@ -1,12 +1,16 @@
 <script lang="ts">
   import { api, preview } from "../lib/api";
-  import { tick } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import { markdown, minutes, mmss, pausesBefore, speakerColor, speakerName, when } from "../lib/format";
   import type { JobEvent, Meeting } from "../lib/types";
   import { JOB_STEPS } from "../lib/api";
   import summaryIcon from "../assets/summary.png";
   import transcriptionIcon from "../assets/transcription.png";
   import LabelEditor from "./LabelEditor.svelte";
+  import Player from "./Player.svelte";
+  import MiniPlayer from "./MiniPlayer.svelte";
+  import { load as loadAudio, play, player, seek, skip, toggle, unload as unloadAudio } from "../lib/player.svelte";
+  import { lineAt, wordAt, wordTimes } from "../lib/replay";
 
   let { id, job, onback, notify }: { id: string; job?: JobEvent; onback: () => void; notify: (t: string, e?: boolean) => void } = $props();
   const importing = $derived(!!job && !["done", "failed"].includes(job.step));
@@ -21,9 +25,59 @@
   async function jump(t: number) {
     tab = "transcript";
     focusAt = t;
+    if (replay) playFrom(t);
     await tick();
     document.getElementById(`line-${t}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
+
+  // ── Replay (spec 014) ────────────────────────────────────────────────────────────────────
+  /** "loading" until we know; "none" when the meeting has no audio to play. */
+  let audio = $state<"loading" | "ok" | "none">("loading");
+  const replay = $derived(audio === "ok" && player.meetingId === id);
+  /** Playback has started at least once, so the playing line is shown. */
+  const active = $derived(replay && (player.playing || player.time > 0));
+  const starts = $derived(meeting?.segments.map((s) => s.start) ?? []);
+  const nowIdx = $derived(active ? lineAt(starts, player.time) : -1);
+  const nowWords = $derived(nowIdx >= 0 && meeting ? wordTimes(meeting.segments[nowIdx]) : []);
+  const nowWord = $derived(wordAt(nowWords, player.time));
+  /** The user scrolled away from the playing line while Follow is on. */
+  let away = $state(false);
+
+  function playFrom(t: number) {
+    seek(t);
+    away = false;
+    void play();
+  }
+
+  function scrollToNow(smooth = true) {
+    if (!meeting || nowIdx < 0) return;
+    document.getElementById(`line-${meeting.segments[nowIdx].start}`)?.scrollIntoView({ block: "center", behavior: smooth ? "smooth" : "auto" });
+  }
+  $effect(() => {
+    void nowIdx;
+    if (tab === "transcript" && player.follow && player.playing && !away) scrollToNow();
+  });
+
+  function scrolledByUser() {
+    if (tab === "transcript" && player.follow && player.playing) away = true;
+  }
+  function onkey(e: KeyboardEvent) {
+    const el = e.target as HTMLElement | null;
+    if (["PageUp", "PageDown", "Home", "End"].includes(e.key)) return scrolledByUser();
+    if (!replay || tab !== "transcript" || e.ctrlKey || e.altKey || e.metaKey) return;
+    if (el && (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(el.tagName))) return;
+    if (e.key === " ") toggle();
+    else if (e.key === "ArrowLeft") skip(-5);
+    else if (e.key === "ArrowRight") skip(5);
+    else return;
+    e.preventDefault();
+  }
+  function clickLine(t: number) {
+    if (!replay || window.getSelection()?.toString()) return; // selecting text isn't a click
+    playFrom(t);
+  }
+  onDestroy(unloadAudio); // leaving the meeting page stops playback
+
 
   let confirmDelete = $state(false);
   async function keepAudio(keep: boolean) {
@@ -38,6 +92,8 @@
     if (!meeting) return;
     confirmDelete = false;
     try {
+      unloadAudio();
+      audio = "none";
       meeting = await api.deleteAudio(meeting.meta.id);
       notify("Audio deleted — the transcript and notes are kept.");
     } catch (e) {
@@ -61,9 +117,19 @@
     const want = id;
     void (job?.step === "done"); // reload when an import of this meeting finishes
     meeting = null;
+    if (player.meetingId !== want) {
+      unloadAudio();
+      audio = "loading";
+    }
     api.meeting(want).then((m) => {
       if (want === id) {
         meeting = m;
+        if (!m.meta.finished || m.meta.audio_deleted_at) audio = "none";
+        else api.audioTracks(want).then((urls) => {
+          if (want !== id) return;
+          loadAudio(want, urls, Math.max(m.meta.duration_s, m.segments.at(-1)?.end ?? 0));
+          audio = urls.mic || urls.call ? "ok" : "none";
+        }).catch((e) => { audio = "none"; notify(String(e), true); });
         tab = m.notes || m.summaries.some((s) => s.kind === "final") ? "summary" : "transcript";
         if (preview && ["#speakers", "#transcript", "#tasks"].includes(location.hash)) tab = location.hash.slice(1) as typeof tab; // browser preview only
       }
@@ -122,6 +188,8 @@
   const final = $derived(meeting?.summaries.filter((s) => s.kind === "final").at(-1));
   const partials = $derived(meeting?.summaries.filter((s) => s.kind === "partial") ?? []);
 </script>
+
+<svelte:window onkeydown={onkey} onwheel={scrolledByUser} ontouchmove={scrolledByUser} />
 
 <section class="screen">
   <button class="back" onclick={onback}>← Meetings</button>
@@ -247,17 +315,35 @@
       </div>
     {:else}
       <div class="card tx">
+        {#if replay}
+          <Player segments={meeting.segments} speakers={meeting.speakers} pauses={pauseAts} onseek={() => (away = false)} />
+        {:else if audio === "none" && meeting.meta.finished && meeting.segments.length}
+          <div class="gone">🔇 {meeting.meta.audio_deleted_at
+            ? `The audio of this meeting was deleted on ${new Date(meeting.meta.audio_deleted_at).toLocaleDateString([], { day: "numeric", month: "short" })} — the transcript stays, replay isn't available.`
+            : "No audio was kept for this meeting — replay isn't available."}</div>
+        {/if}
         {#each meeting.segments as seg, i (i)}
           {#each pausesBefore(pauseAts, meeting.segments, i) as p}<div class="pausemark">— paused at {mmss(p)} —</div>{/each}
-          <div class="line" id={`line-${seg.start}`} class:focus={focusAt === seg.start}>
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <div class="line" id={`line-${seg.start}`} class:focus={focusAt === seg.start && !active} class:now={i === nowIdx}
+            class:playable={replay} class:muted={replay && player.muted[seg.track]} onclick={() => clickLine(seg.start)}
+            title={replay ? "Play from here" : undefined}>
             <span class="ts">{mmss(seg.start)}</span>
             <span class="who" style="color:{speakerColor(seg)}">{speakerName(seg, meeting.speakers)}</span>
-            <span>{seg.text}</span>
+            <span>{#if i === nowIdx}{#each nowWords as w, wi}<span class="w" class:said={wi < nowWord} class:cur={wi === nowWord}>{w.text}</span>{" "}{/each}{:else}{seg.text}{/if}</span>
           </div>
         {:else}
           <p class="faint">Nothing was transcribed.</p>
         {/each}
+        {#if active && player.follow && away}
+          <button class="btn ghost sm backto" onclick={() => { away = false; scrollToNow(); }}>↓ Back to playing line</button>
+        {/if}
       </div>
+    {/if}
+    {#if active && tab !== "transcript"}
+      {@const seg = nowIdx >= 0 ? meeting.segments[nowIdx] : null}
+      <div class="minispace"></div>
+      <MiniPlayer line={seg ? `${speakerName(seg, meeting.speakers)}: ${seg.text}` : ""} ongo={() => { tab = "transcript"; away = false; tick().then(() => scrollToNow(false)); }} />
     {/if}
   {/if}
 </section>
@@ -303,6 +389,20 @@
   .quote { background: none; border: 0; border-left: 3px solid var(--line); color: var(--ink-2); text-align: left; padding: 2px 0 2px 8px; cursor: pointer; font-size: 13px; }
   .quote:hover { border-left-color: var(--teal); color: var(--ink); }
   .line.focus { background: #24425f; border-radius: 6px; }
+  /* replay (spec 014) */
+  .gone { color: var(--ink-3); font-size: 13px; padding: 10px 0; border-bottom: 1px solid #22405c; }
+  .line.playable { cursor: pointer; }
+  .line .ts { position: relative; }
+  .line.playable:hover .ts::before { content: "▶"; position: absolute; left: -14px; top: 2px; font-size: 10px; color: var(--teal); }
+  .line.now { background: #24425f; border-radius: 6px; }
+  .line.now .ts { color: var(--teal); font-weight: 800; }
+  .line.muted { opacity: .45; }
+  .w { border-radius: 4px; transition: background .12s, color .12s; }
+  .line.now .w { color: var(--ink-2); }
+  .line.now .w.said { color: var(--ink); }
+  .w.cur { background: #64bfc433; color: #fff; box-shadow: 0 0 0 2px #64bfc433; }
+  .minispace { height: 64px; } /* room for the fixed mini player under the last lines */
+  .backto { position: sticky; bottom: 10px; float: right; margin: 8px 0; z-index: 2; }
   .count { margin-left: 4px; font-size: 11px; background: var(--navy-3); border-radius: 10px; padding: 1px 7px; }
   .voices { max-width: 760px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
   .voice { display: flex; gap: 12px; width: 100%; padding: 12px 14px; }

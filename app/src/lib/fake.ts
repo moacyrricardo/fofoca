@@ -215,3 +215,34 @@ function startFake(title: string, labels: string[]): MeetingMeta {
   segs.forEach((s, i) => timers.push(window.setTimeout(() => emit({ type: "segment", segment: s }), 1500 + i * 1700)));
   return meta;
 }
+
+// Replay (spec 014): short generated tracks so the browser preview plays real sound — a hum with
+// syllable-like bursts wherever that track speaks (mic: one low voice; call: a pitch per voice).
+const audioCache = new Map<string, string>();
+function tone(segments: Segment[], pick: (s: Segment) => number | null): string {
+  const rate = 8000, secs = Math.ceil(Math.max(0, ...segments.map((s) => s.end))) + 2;
+  const n = rate * secs, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o: number, t: string) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, "data"); v.setUint32(40, n * 2, true);
+  for (const s of segments) {
+    const f = pick(s);
+    if (f === null) continue;
+    for (let i = Math.floor(s.start * rate); i < Math.min(n, Math.floor(s.end * rate)); i++) {
+      const t = i / rate, syllable = Math.max(0, Math.sin(Math.PI * 4 * (t - s.start)));
+      v.setInt16(44 + i * 2, Math.round(5000 * syllable * Math.sin(2 * Math.PI * f * t)), true);
+    }
+  }
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+
+export function audioTracks(id: string): { mic: string | null; call: string | null } {
+  const m = meetings.find((x) => x.meta.id === id);
+  if (!m || m.meta.audio_deleted_at || !m.meta.finished || !m.segments.length) return { mic: null, call: null };
+  const key = (t: string) => `${id}:${t}`;
+  const voice = (s: Segment) => (s.speaker && s.speaker !== "you" ? 260 + 90 * (parseInt(s.speaker.slice(1), 10) || 1) : 330);
+  if (!audioCache.has(key("call"))) audioCache.set(key("call"), tone(m.segments, (s) => (s.track === "call" ? voice(s) : null)));
+  if (!m.meta.imported_from && !audioCache.has(key("mic"))) audioCache.set(key("mic"), tone(m.segments, (s) => (s.track === "you" ? 196 : null)));
+  return { mic: m.meta.imported_from ? null : audioCache.get(key("mic"))!, call: audioCache.get(key("call"))! };
+}
