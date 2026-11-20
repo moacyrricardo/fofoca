@@ -38,9 +38,9 @@
     screen = "meeting";
   }
 
-  async function start(title: string, attendees: string[] = [], labels: string[] = []) {
+  async function start(title: string, attendees: string[] = [], labels: string[] = [], calendarUid: string | null = null) {
     try {
-      const m = await api.start(title, attendees, labels);
+      const m = await api.start(title, attendees, labels, calendarUid);
       if (!live.meeting) resetLive(m);
       screen = "live";
     } catch (e) {
@@ -118,7 +118,7 @@
         if (s.auto_record && untilStart <= 0 && untilStart > -120_000 && !autoStarted.has(key) && !live.meeting) {
           autoStarted.add(key);
           banner = null;
-          await start(e.title, e.attendees, e.labels ?? []);
+          await start(e.title, e.attendees, e.labels ?? [], e.uid);
           api.notify(`Recording “${e.title}”`, "Stop or discard it anytime in fo-foca.").catch(() => {});
         }
       }
@@ -201,7 +201,7 @@
       <div class="banner">
         <span>📅 <b>{banner.title}</b> {new Date(banner.start).getTime() > Date.now() ? "starts in a minute" : "is starting"}</span>
         <span class="sp"></span>
-        <button class="btn rec sm" onclick={() => { const b = banner!; banner = null; start(b.title, b.attendees, b.labels ?? []); }}>● Record</button>
+        <button class="btn rec sm" onclick={() => { const b = banner!; banner = null; start(b.title, b.attendees, b.labels ?? [], b.uid); }}>● Record</button>
         <button class="btn ghost sm" onclick={() => (banner = null)}>Dismiss</button>
       </div>
     {/if}

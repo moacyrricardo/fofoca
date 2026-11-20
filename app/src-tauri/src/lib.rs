@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use fofoca_core::calendar::{CalendarEvent, CalendarSettings, CalendarSource, Calendars, Keyring};
 use fofoca_core::config::config_path;
 use fofoca_core::model::Meeting;
-use fofoca_core::{Config, MeetingMeta, Session, SessionEvent, Store};
+use fofoca_core::{Config, MeetingMeta, Session, SessionEvent, StartInfo, Store};
 use serde::Serialize;
 use tauri::image::Image;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -101,7 +101,14 @@ fn start_session(
     title: String,
     attendees: Option<Vec<String>>,
     labels: Option<Vec<String>>,
+    calendar_uid: Option<String>,
 ) -> CmdResult<MeetingMeta> {
+    let mut labels = labels.unwrap_or_default();
+    // spec 009: a recurring meeting gets the labels its last recording had
+    if let Some(uid) = calendar_uid.as_deref() {
+        labels.extend(state.store.labels_for_series(uid).unwrap_or_default());
+    }
+    let info = StartInfo { title, attendees: attendees.unwrap_or_default(), labels, calendar_uid };
     let mut slot = state.session.lock().unwrap();
     if slot.is_some() {
         return Err("a recording is already running".into());
@@ -114,15 +121,7 @@ fn start_session(
         }
         let _ = handle.emit("session", &e);
     });
-    let session = Session::start(
-        state.cfg.clone(),
-        state.store.clone(),
-        &title,
-        &attendees.unwrap_or_default(),
-        &labels.unwrap_or_default(),
-        sink,
-    )
-    .map_err(err)?;
+    let session = Session::start(state.cfg.clone(), state.store.clone(), &info, sink).map_err(err)?;
     let meta = session.meeting.clone();
     *slot = Some(session);
     Ok(meta)
@@ -230,17 +229,30 @@ async fn upcoming_events(app: AppHandle, force: bool) -> CmdResult<Upcoming> {
 }
 
 fn fetch_upcoming(state: &AppState, force: bool) -> Upcoming {
-    if !force {
-        if let Some((at, u)) = state.upcoming.lock().unwrap().as_ref() {
-            if at.elapsed() < CALENDAR_TTL {
-                return u.clone();
-            }
+    let cached = if force {
+        None
+    } else {
+        state.upcoming.lock().unwrap().as_ref().filter(|(at, _)| at.elapsed() < CALENDAR_TTL).map(|(_, u)| u.clone())
+    };
+    let u = cached.unwrap_or_else(|| {
+        let now = chrono::Utc::now();
+        let (events, errors) = state.calendars.upcoming(now, now + chrono::Duration::days(7));
+        let u = Upcoming { events, errors };
+        *state.upcoming.lock().unwrap() = Some((Instant::now(), u.clone()));
+        u
+    });
+    with_series_labels(&state.store, u)
+}
+
+/// Add each event's series labels (spec 009) to its calendar defaults, so the UI shows exactly the
+/// labels a recording would get. Done after the cache: labels edited a minute ago count.
+fn with_series_labels(store: &Store, mut u: Upcoming) -> Upcoming {
+    let Ok(meetings) = store.list(None) else { return u };
+    for e in &mut u.events {
+        if let Some(m) = meetings.iter().find(|m| m.calendar_uid.as_deref() == Some(e.uid.as_str())) {
+            e.labels = fofoca_core::labels::normalize_all(&[e.labels.as_slice(), m.labels.as_slice()].concat());
         }
     }
-    let now = chrono::Utc::now();
-    let (events, errors) = state.calendars.upcoming(now, now + chrono::Duration::days(7));
-    let u = Upcoming { events, errors };
-    *state.upcoming.lock().unwrap() = Some((Instant::now(), u.clone()));
     u
 }
 

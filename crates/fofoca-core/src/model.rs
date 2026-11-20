@@ -69,6 +69,19 @@ pub struct MeetingMeta {
     /// Normalized labels (spec 007), see [`crate::labels::normalize`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// `UID` of the calendar event it was recorded from — shared by every instance of a recurring
+    /// series, so later recordings can inherit labels (spec 009).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar_uid: Option<String>,
+}
+
+/// What a new meeting starts with.
+#[derive(Clone, Debug, Default)]
+pub struct StartInfo {
+    pub title: String,
+    pub attendees: Vec<String>,
+    pub labels: Vec<String>,
+    pub calendar_uid: Option<String>,
 }
 
 /// A meeting as loaded from disk.

@@ -22,7 +22,7 @@ use fofoca_core::model::{Summary, SummaryKind};
 use fofoca_core::prompts::{self, mmss};
 use fofoca_core::servers::{Kind, ModelServer};
 use fofoca_core::whisper::WhisperClient;
-use fofoca_core::{Config, Session, SessionEvent, Store};
+use fofoca_core::{Config, Session, SessionEvent, StartInfo, Store};
 
 fn main() {
     if let Err(e) = run() {
@@ -104,7 +104,7 @@ fn record(cfg: Config, store: Store, args: &[String]) -> Result<()> {
         other => eprintln!("{}", serde_json::to_string(other).unwrap_or_default()),
     });
     let labels: Vec<String> = args.windows(2).filter(|w| w[0] == "--label").map(|w| w[1].clone()).collect();
-    let session = Session::start(cfg, store, &title, &[], &labels, sink)?;
+    let session = Session::start(cfg, store, &StartInfo { title, labels, ..Default::default() }, sink)?;
     let t0 = Instant::now();
     let mut asked = false;
     while t0.elapsed() < Duration::from_secs(seconds) {

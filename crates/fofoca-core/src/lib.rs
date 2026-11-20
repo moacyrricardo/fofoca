@@ -16,6 +16,6 @@ pub mod store;
 pub mod whisper;
 
 pub use config::Config;
-pub use model::{MeetingMeta, Segment, Summary, Track, Word};
+pub use model::{MeetingMeta, Segment, StartInfo, Summary, Track, Word};
 pub use session::{ModelState, Session, SessionEvent};
 pub use store::Store;
