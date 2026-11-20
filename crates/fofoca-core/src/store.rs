@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::labels;
-use crate::model::{Meeting, MeetingMeta, Segment, Summary};
+use crate::model::{Meeting, MeetingMeta, Segment, StartInfo, Summary};
 
 /// Serializes read-modify-write of meta.json files (UI commands and the session worker run on
 /// different threads).
@@ -41,7 +41,8 @@ impl Store {
     }
 
     /// Create a new meeting folder with an id derived from the local start time.
-    pub fn create(&self, title: &str, attendees: &[String], labels: &[String]) -> Result<MeetingMeta> {
+    pub fn create(&self, info: &StartInfo) -> Result<MeetingMeta> {
+        let title = info.title.as_str();
         let now = chrono::Local::now();
         let mut id = now.format("%Y-%m-%d-%H%M%S").to_string();
         let mut n = 1;
@@ -56,8 +57,9 @@ impl Store {
             started_at: now.to_rfc3339(),
             duration_s: 0.0,
             finished: false,
-            attendees: attendees.to_vec(),
-            labels: labels::normalize_all(labels),
+            attendees: info.attendees.clone(),
+            labels: labels::normalize_all(&info.labels),
+            calendar_uid: info.calendar_uid.clone().filter(|u| !u.is_empty()),
         };
         self.save_meta(&meta)?;
         Ok(meta)
@@ -81,6 +83,12 @@ impl Store {
     pub fn set_labels<S: AsRef<str>>(&self, id: &str, new: &[S]) -> Result<MeetingMeta> {
         let new = labels::normalize_all(new);
         self.update_meta(id, |m| m.labels = new)
+    }
+
+    /// Labels of the most recent meeting recorded from calendar event `uid` (empty if none).
+    pub fn labels_for_series(&self, uid: &str) -> Result<Vec<String>> {
+        // list() is newest first
+        Ok(self.list(None)?.into_iter().find(|m| m.calendar_uid.as_deref() == Some(uid)).map(|m| m.labels).unwrap_or_default())
     }
 
     /// Every label in use with the number of meetings carrying it, most used first.
@@ -160,7 +168,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fofoca-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let store = Store::new(&root).unwrap();
-        let mut meta = store.create("Sync", &["Rodrigo".into()], &[]).unwrap();
+        let mut meta = store.create(&StartInfo { title: "Sync".into(), attendees: vec!["Rodrigo".into()], ..Default::default() }).unwrap();
         let seg = Segment { start: 0.0, end: 1.0, text: "Oi".into(), track: Track::You, words: vec![] };
         store.append_segment(&meta.id, &seg).unwrap();
         store.append_segment(&meta.id, &seg).unwrap();
@@ -175,7 +183,7 @@ mod tests {
         assert_eq!(m.summaries.len(), 1);
         assert!(m.meta.finished);
         assert_eq!(store.load(&meta.id).unwrap().meta.attendees, vec!["Rodrigo".to_string()]);
-        let second = store.create("", &[], &["Trabalho".into(), "trabalho".into()]).unwrap();
+        let second = store.create(&StartInfo { labels: vec!["Trabalho".into(), "trabalho".into()], ..Default::default() }).unwrap();
         assert_ne!(second.id, meta.id);
         assert_eq!(second.labels, vec!["trabalho"]);
         assert_eq!(store.list(None).unwrap().len(), 2);
@@ -191,6 +199,29 @@ mod tests {
         assert!(store.list(Some("nope")).unwrap().is_empty());
         assert_eq!(store.known_labels().unwrap(), vec![("trabalho".to_string(), 2), ("cliente-bh".to_string(), 1)]);
         assert!(store.set_labels("missing", &["x"]).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn series_labels_come_from_the_newest_meeting() {
+        let root = std::env::temp_dir().join(format!("fofoca-store-series-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::new(&root).unwrap();
+        let info = |labels: &[&str], uid: Option<&str>| StartInfo {
+            labels: labels.iter().map(|s| s.to_string()).collect(),
+            calendar_uid: uid.map(str::to_string),
+            ..Default::default()
+        };
+        assert!(store.labels_for_series("weekly@x").unwrap().is_empty());
+        let old = store.create(&info(&["1:1"], Some("weekly@x"))).unwrap();
+        let new = store.create(&info(&["1:1", "fernanda"], Some("weekly@x"))).unwrap();
+        store.create(&info(&["other"], Some("else@x"))).unwrap();
+        store.create(&info(&["no-uid"], None)).unwrap();
+        // ids are second-resolution; force the order instead of sleeping
+        store.update_meta(&old.id, |m| m.started_at = "2026-11-01T10:00:00-03:00".into()).unwrap();
+        store.update_meta(&new.id, |m| m.started_at = "2026-11-08T10:00:00-03:00".into()).unwrap();
+        assert_eq!(store.labels_for_series("weekly@x").unwrap(), vec!["1:1", "fernanda"]);
+        assert_eq!(store.load(&new.id).unwrap().meta.calendar_uid.as_deref(), Some("weekly@x"));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

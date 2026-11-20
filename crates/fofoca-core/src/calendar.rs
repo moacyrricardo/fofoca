@@ -436,7 +436,9 @@ impl<S: SecretStore> Calendars<S> {
         if kind == SourceKind::Link {
             self.secrets.set(&id, &normalize_url(input))?;
         }
-        let source = CalendarSource { id, kind, label, location, default_labels: Vec::new() };
+        // spec 009: the calendar's name is its first default label (editable in Settings)
+        let default_labels = crate::labels::normalize_all(&[&label]);
+        let source = CalendarSource { id, kind, label, location, default_labels };
         s.sources.push(source.clone());
         self.save(&s)?;
         Ok(source)
@@ -620,6 +622,7 @@ END:VCALENDAR\r\n";
         let cals = Calendars::new(dir.join("calendars.json"), Mem::default()).unwrap();
         let src = cals.add(ics.to_str().unwrap()).unwrap();
         assert_eq!(src.label, "Trabalho");
+        assert_eq!(src.default_labels, vec!["trabalho"], "calendar name becomes the default label");
         assert_eq!(src.kind, SourceKind::File);
         let (ev, errs) = cals.upcoming(utc("2026-11-19T00:00:00Z"), utc("2026-11-24T00:00:00Z"));
         assert!(errs.is_empty());
@@ -659,7 +662,7 @@ END:VCALENDAR\r\n";
         assert!(cals.set_default_labels("nope", &["x"]).is_err());
         let (ev, _) = cals.upcoming(utc("2026-11-19T00:00:00Z"), utc("2026-11-24T00:00:00Z"));
         assert!(ev.iter().filter(|e| e.calendar == "Pessoal").all(|e| e.labels == ["pessoal", "família"]));
-        assert!(ev.iter().filter(|e| e.calendar == "Trabalho").all(|e| e.labels.is_empty()));
+        assert!(ev.iter().filter(|e| e.calendar == "Trabalho").all(|e| e.labels == ["trabalho"]));
         cals.remove(&sa.id).unwrap();
         assert_eq!(cals.settings().sources.iter().map(|s| &s.id).collect::<Vec<_>>(), vec![&sb.id]);
         std::fs::remove_dir_all(&dir).unwrap();

@@ -22,7 +22,7 @@ use crate::audio::{self, WavAppender, SAMPLE_RATE};
 use crate::capture::{Capture, CaptureStopper, Source};
 use crate::config::Config;
 use crate::llm::LlmClient;
-use crate::model::{MeetingMeta, Segment, Summary, SummaryKind, Word};
+use crate::model::{MeetingMeta, Segment, StartInfo, Summary, SummaryKind, Word};
 use crate::prompts;
 use crate::servers::{Kind, ModelServer};
 use crate::store::Store;
@@ -81,8 +81,8 @@ struct Shared {
 
 impl Session {
     /// Create the meeting folder, start both captures immediately and start loading Whisper.
-    pub fn start(cfg: Config, store: Store, title: &str, attendees: &[String], labels: &[String], on_event: EventSink) -> Result<Session> {
-        let meeting = store.create(title, attendees, labels)?;
+    pub fn start(cfg: Config, store: Store, info: &StartInfo, on_event: EventSink) -> Result<Session> {
+        let meeting = store.create(info)?;
         let mic = Capture::start(Source::Microphone)?;
         let sys = Capture::start(Source::SystemAudio)?;
         on_event(SessionEvent::Started { meeting: meeting.clone() });

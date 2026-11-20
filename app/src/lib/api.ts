@@ -20,7 +20,8 @@ export const api = {
   meetings: () => call<MeetingMeta[]>("list_meetings"),
   meeting: (id: string) => call<Meeting>("get_meeting", { id }),
   activeSession: () => call<MeetingMeta | null>("active_session"),
-  start: (title: string, attendees: string[] = [], labels: string[] = []) => call<MeetingMeta>("start_session", { title, attendees, labels }),
+  start: (title: string, attendees: string[] = [], labels: string[] = [], calendarUid: string | null = null) =>
+    call<MeetingMeta>("start_session", { title, attendees, labels, calendarUid }),
   knownLabels: () => call<LabelCount[]>("known_labels"),
   setMeetingLabels: (id: string, labels: string[]) => call<MeetingMeta>("set_meeting_labels", { id, labels }),
   summarize: () => call<void>("summarize_now"),

@@ -3,7 +3,7 @@
   import { api } from "../lib/api";
   import type { CalendarEvent } from "../lib/types";
 
-  let { onrecord, onsetup, disabled }: { onrecord: (title: string, attendees: string[], labels: string[]) => void; onsetup: () => void; disabled: boolean } = $props();
+  let { onrecord, onsetup, disabled }: { onrecord: (title: string, attendees: string[], labels: string[], calendarUid: string) => void; onsetup: () => void; disabled: boolean } = $props();
 
   let events = $state<CalendarEvent[] | null>(null);
   let hasCalendars = $state(true);
@@ -66,8 +66,9 @@
         <div class="txt">
           <b>{e.title}</b>
           <div class="faint small">{[service(e.call_link), e.attendees.slice(0, 3).join(", ") + (e.attendees.length > 3 ? ` +${e.attendees.length - 3}` : "")].filter(Boolean).join(" · ")}</div>
+          {#if e.labels?.length}<div class="evlabels" title="Labels this recording will get">{#each e.labels as l (l)}<span class="chip label">{l}</span>{/each}</div>{/if}
         </div>
-        <button class="btn sm" class:rec={i === 0} class:ghost={i > 0} onclick={() => onrecord(e.title, e.attendees, e.labels ?? [])} {disabled}>● Record this</button>
+        <button class="btn sm" class:rec={i === 0} class:ghost={i > 0} onclick={() => onrecord(e.title, e.attendees, e.labels ?? [], e.uid)} {disabled}>● Record this</button>
       </div>
     {/each}
   </div>
@@ -84,6 +85,8 @@
   .txt { flex: 1; min-width: 0; }
   .txt b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .small { font-size: 12.5px; }
+  .evlabels { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+  .evlabels .chip { font-size: 11px; padding: 1px 8px; }
   .none { margin-top: 12px; }
   .err { color: var(--warn); }
   .setup { margin-top: 12px; background: none; border: 1px dashed var(--line); color: var(--ink-2); border-radius: 12px; padding: 9px 12px; cursor: pointer; font-weight: 700; font-size: 13px; }

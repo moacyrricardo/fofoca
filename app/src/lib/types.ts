@@ -6,7 +6,7 @@ export type ModelState = "off" | "loading" | "ready" | "busy";
 export interface Word { start: number; end: number; text: string; p: number }
 export interface Segment { start: number; end: number; text: string; track: Track; words: Word[] }
 export interface Summary { kind: "partial" | "final"; at_s: number; text: string; model: string; gen_tokens_per_s: number }
-export interface MeetingMeta { id: string; title: string; started_at: string; duration_s: number; finished: boolean; attendees?: string[]; labels?: string[] }
+export interface MeetingMeta { id: string; title: string; started_at: string; duration_s: number; finished: boolean; attendees?: string[]; labels?: string[]; calendar_uid?: string }
 export interface Meeting { meta: MeetingMeta; segments: Segment[]; summaries: Summary[] }
 
 export interface Status {

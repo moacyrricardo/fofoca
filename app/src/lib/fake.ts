@@ -28,7 +28,7 @@ O relatório do 3º trimestre de 2026 mostra indicadores abaixo das metas da dir
 
 const meetings: Meeting[] = [
   { meta: { id: "2026-11-19-140200", title: "Relatório Q3 — revisão com a diretoria", started_at: "2026-11-19T14:02:00-03:00", duration_s: 1104, finished: true, labels: ["trabalho", "diretoria"] }, segments: segs, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
-  { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true, labels: ["trabalho", "1:1"] }, segments: segs.slice(0, 3), summaries: [] },
+  { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true, labels: ["trabalho", "1:1"], calendar_uid: "1" }, segments: segs.slice(0, 3), summaries: [] },
 ];
 
 const config: ConfigView = {
@@ -64,12 +64,13 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   switch (cmd) {
     case "get_config": return config as T;
     case "calendar_settings": return calSettings as T;
-    case "upcoming_events": return { events, errors: [] } as T;
+    case "upcoming_events":
+      return { events: events.map((e) => ({ ...e, labels: normalizeLabels([...e.labels, ...(meetings.find((m) => m.meta.calendar_uid === e.uid)?.meta.labels ?? [])]) })), errors: [] } as T;
     case "set_calendar_options": calSettings = { ...calSettings, only_with_call_link: Boolean(args?.onlyWithCallLink), notify_before: Boolean(args?.notifyBefore), auto_record: Boolean(args?.autoRecord) }; return calSettings as T;
     case "notify": console.log("notify", args); return undefined as T;
     case "remove_calendar": calSettings = { ...calSettings, sources: calSettings.sources.filter((s) => s.id !== args?.id) }; return undefined as T;
     case "add_calendar": {
-      const src = { id: `cal-${Date.now()}`, kind: "link" as const, label: "Pessoal", location: "calendar.google.com" };
+      const src = { id: `cal-${Date.now()}`, kind: "link" as const, label: "Pessoal", location: "calendar.google.com", default_labels: ["pessoal"] };
       calSettings = { ...calSettings, sources: [...calSettings.sources, src] };
       return src as T;
     }
@@ -90,7 +91,11 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       return calSettings as T;
     case "get_meeting": return (meetings.find((m) => m.meta.id === args?.id) ?? meetings[0]) as T;
     case "active_session": return live as T;
-    case "start_session": return startFake(String(args?.title ?? ""), normalizeLabels((args?.labels as string[]) ?? [])) as T;
+    case "start_session": {
+      const uid = args?.calendarUid as string | null;
+      const series = uid ? meetings.find((m) => m.meta.calendar_uid === uid)?.meta.labels ?? [] : [];
+      return startFake(String(args?.title ?? ""), normalizeLabels([...((args?.labels as string[]) ?? []), ...series])) as T;
+    }
     case "summarize_now":
       emit(status(0, "off", "loading"));
       timers.push(window.setTimeout(() => emit(status(3, "off", "busy")), 1200));

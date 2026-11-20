@@ -11,7 +11,7 @@
     meetings: MeetingMeta[];
     recording: boolean;
     onopen: (id: string) => void;
-    onstart: (title: string, attendees?: string[], labels?: string[]) => void;
+    onstart: (title: string, attendees?: string[], labels?: string[], calendarUid?: string | null) => void;
     onresume: () => void;
     onsetup: () => void;
   } = $props();
