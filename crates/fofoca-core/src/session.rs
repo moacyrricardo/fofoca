@@ -425,22 +425,25 @@ impl Worker {
                 slicers[0].finish().into_iter().for_each(|x| queue.push(x));
             }
             *self.shared.queued_s.lock().unwrap() = queue.queued_s() + slicers.iter().map(Slicer::pending_s).sum::<f64>();
-            if live && self.transcribe_next(&mut queue) {
-                continue; // drain the backlog before anything else
-            }
-            if stopping {
-                break;
-            }
-            if let Some(every) = pace.summary_every_s {
+            if let Some(every) = pace.summary_every_s.filter(|_| !stopping) {
                 // automatic "summary so far" (spec 015) — only once there's something to summarize
                 if self.offset_s - self.last_summary_at >= every as f64 && self.word_count() >= MIN_WORDS_TO_SUMMARIZE {
                     pending_summary = true;
                 }
             }
-            if pending_summary {
+            if pending_summary && !stopping {
+                // Before the next request, not once the queue is empty: with Whisper near real
+                // time the queue rarely empties, and slices keep queuing meanwhile (spec 019 §2).
                 pending_summary = false;
                 self.last_summary_at = self.offset_s;
                 self.summarize(SummaryKind::Partial);
+                continue;
+            }
+            if live && self.transcribe_next(&mut queue) {
+                continue; // work through the backlog before sleeping
+            }
+            if stopping {
+                break;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
