@@ -1,7 +1,9 @@
 //! Tauri shell: exposes fofoca-core to the UI as commands and forwards session events.
 
 mod settings;
+mod tray;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -19,6 +21,7 @@ struct AppState {
     cfg: RwLock<Config>,
     store: Store,
     session: Mutex<Option<Session>>,
+    quit_after_save: AtomicBool,
     calendars: Calendars<Keyring>,
     /// Serves replay audio (spec 014 fix).
     media: fofoca_core::media::MediaServer,
@@ -256,18 +259,23 @@ fn active_session(state: State<AppState>) -> Option<MeetingMeta> {
 #[tauri::command]
 fn start_session(
     app: AppHandle,
-    state: State<AppState>,
     title: String,
     attendees: Option<Vec<String>>,
     labels: Option<Vec<String>>,
     calendar_uid: Option<String>,
 ) -> CmdResult<MeetingMeta> {
-    let mut labels = labels.unwrap_or_default();
+    start_recording(&app, StartInfo {
+        title, attendees: attendees.unwrap_or_default(), labels: labels.unwrap_or_default(),
+        calendar_uid, ..Default::default()
+    })
+}
+
+fn start_recording(app: &AppHandle, mut info: StartInfo) -> CmdResult<MeetingMeta> {
+    let state = app.state::<AppState>();
     // spec 009: a recurring meeting gets the labels its last recording had
-    if let Some(uid) = calendar_uid.as_deref() {
-        labels.extend(state.store.labels_for_series(uid).unwrap_or_default());
+    if let Some(uid) = info.calendar_uid.as_deref() {
+        info.labels.extend(state.store.labels_for_series(uid).unwrap_or_default());
     }
-    let info = StartInfo { title, attendees: attendees.unwrap_or_default(), labels, calendar_uid, ..Default::default() };
     let mut slot = state.session.lock().unwrap();
     if slot.is_some() {
         return Err("a recording is already running".into());
@@ -277,9 +285,17 @@ fn start_session(
         if matches!(e, SessionEvent::Finished { .. } | SessionEvent::Discarded { .. }) {
             // The worker thread emits this as its last act; dropping the handle detaches it.
             let state = handle.state::<AppState>();
-            state.session.lock().unwrap().take();
+            let mut slot = state.session.lock().unwrap();
+            slot.take();
             state.jobs.set_recording(false);
+            tray::session_event(&handle, &e);
+            let _ = handle.emit("session", &e);
+            if state.quit_after_save.swap(false, Ordering::Relaxed) && matches!(e, SessionEvent::Finished { .. }) {
+                handle.exit(0);
+            }
+            return;
         }
+        tray::session_event(&handle, &e);
         let _ = handle.emit("session", &e);
     });
     // imports give the GPU back while we record (spec 012)
@@ -465,7 +481,10 @@ pub fn run() {
             );
             // Replay (spec 014): meeting audio over loopback HTTP, token-guarded, meeting audio only.
             let media = fofoca_core::media::MediaServer::start(store.clone())?;
-            app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), calendars, upcoming: Mutex::new(None), jobs, media, settings: Default::default() });
+            app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), quit_after_save: AtomicBool::new(false), calendars, upcoming: Mutex::new(None), jobs, media, settings: Default::default() });
+            if let Err(error) = tray::setup(app.handle()) {
+                eprintln!("tray unavailable: {error}");
+            }
             settings::probe_in_background(app.handle().clone()); // spec 015: off the UI thread
             // Embedded so the window has the seal icon even when no .desktop entry is installed
             // (X11/XWayland). GNOME on Wayland takes the icon from the desktop entry instead —
@@ -505,6 +524,7 @@ pub fn run() {
             start_session,
             summarize_now,
             stop_session,
+            tray::stop_and_quit,
             discard_session,
             pause_session,
             resume_session,

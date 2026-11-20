@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, onJob, onSession, preview } from "./lib/api";
+  import { api, onJob, onQuitRequested, onSession, preview } from "./lib/api";
   import { live, resetLive } from "./lib/live.svelte";
   import type { CalendarEvent, ConfigView, JobEvent, MeetingMeta, SessionEvent } from "./lib/types";
   import { shortModel } from "./lib/format";
@@ -19,6 +19,19 @@
   let meetings = $state<MeetingMeta[]>([]);
   let config = $state<ConfigView | null>(null);
   let toast = $state<{ text: string; error: boolean } | null>(null);
+  let quitDialog: HTMLDialogElement;
+  let quitMeeting: string | null = null;
+  async function saveAndQuit() {
+    if (!quitMeeting) return;
+    try {
+      await api.stopAndQuit(quitMeeting);
+      quitDialog.close();
+    } catch (e) {
+      quitDialog.close();
+      notify(String(e), true);
+    }
+  }
+
   let toastTimer: number | undefined;
 
   function notify(text: string, error = false) {
@@ -83,6 +96,7 @@
   function handle(e: SessionEvent) {
     switch (e.type) {
       case "started":
+        banner = null;
         resetLive(e.meeting);
         screen = "live";
         break;
@@ -106,6 +120,10 @@
         else live.final = e.summary;
         live.summarizing = false;
         break;
+      case "stopping":
+        live.stopping = true;
+        screen = "processing";
+        break;
       case "step":
         live.steps.push(e.step);
         if (screen === "live") screen = "processing";
@@ -119,12 +137,14 @@
         notify(e.message, true);
         break;
       case "discarded":
+        quitDialog.close();
         resetLive(null);
         screen = "meetings";
         refresh();
         notify("Recording discarded — nothing was kept.");
         break;
       case "finished":
+        quitDialog.close();
         resetLive(null);
         refresh().then(() => open(e.meeting.id));
         break;
@@ -170,6 +190,10 @@
     calendarTick();
     const calTimer = setInterval(calendarTick, 20_000);
     let unlisten: (() => void) | undefined;
+    const quitListener = onQuitRequested((id) => {
+      quitMeeting = id;
+      if (!quitDialog.open) quitDialog.showModal();
+    });
     onSession(handle).then((u) => (unlisten = u));
     let unlistenJobs: (() => void) | undefined;
     onJob(onJobEvent).then((u) => (unlistenJobs = u));
@@ -195,6 +219,7 @@
       }, 50);
     }
     return () => {
+      quitListener.then((unlisten) => unlisten());
       unlisten?.();
       unlistenJobs?.();
       clearInterval(calTimer);
@@ -266,11 +291,22 @@
   </main>
 </div>
 
+<dialog bind:this={quitDialog} class="card quit" aria-labelledby="quit-question">
+  <h2 id="quit-question">A recording is running. Stop and save it, or keep recording?</h2>
+  <div class="row">
+    <button class="btn ghost" onclick={() => quitDialog.close()}>Keep recording</button>
+    <button class="btn rec" onclick={saveAndQuit}>Stop and save</button>
+  </div>
+</dialog>
+
 {#if toast}
   <div class="toast" class:error={toast.error} role="status">{toast.text}</div>
 {/if}
 
 <style>
+  .quit { max-width: 420px; margin: auto; color: var(--ink); }
+  .quit::backdrop { background: #0009; }
+  .quit .row { justify-content: flex-end; gap: 10px; margin-top: 16px; }
   .app { display: flex; height: 100%; --side-w: 212px; }
   .side { width: var(--side-w); background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 16px 12px; gap: 4px; flex: none; }
   .brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 16px; }

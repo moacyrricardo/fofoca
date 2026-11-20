@@ -51,6 +51,8 @@ pub enum SessionEvent {
     Paused { at_s: f64 },
     Resumed { at_s: f64 },
     Segment { segment: Segment },
+    /// Capture stopped; post-call work may still be queued behind model loading.
+    Stopping,
     /// A post-call step started: `transcribing`, `summarizing`, `saving`.
     Step { step: String },
     Summary { summary: Summary },
@@ -76,6 +78,7 @@ enum Command {
 pub const MIN_WORDS_TO_SUMMARIZE: usize = 25;
 
 pub struct Session {
+    emit: EventSink,
     tx: Sender<Command>,
     stoppers: [CaptureStopper; 2],
     buffers: [Arc<TrackBuffer>; 2],
@@ -125,7 +128,7 @@ impl Session {
             cfg,
             store,
             meeting: meeting.clone(),
-            emit: on_event,
+            emit: on_event.clone(),
             shared: shared.clone(),
             mic,
             sys,
@@ -142,7 +145,7 @@ impl Session {
             worker.run(rx);
             let _ = ticker.join();
         })?;
-        Ok(Session { tx, stoppers, buffers, shared, worker: Some(handle), meeting })
+        Ok(Session { emit: on_event, tx, stoppers, buffers, shared, worker: Some(handle), meeting })
     }
 
     /// Stop keeping audio until `resume` — takes effect immediately, even mid model swap.
@@ -186,6 +189,7 @@ impl Session {
     /// summary if `summarize` (and enough was said), and emits `Finished`.
     pub fn stop(&self, summarize: bool) {
         self.stop_capture();
+        (self.emit)(SessionEvent::Stopping);
         let _ = self.tx.send(Command::Stop { summarize });
     }
 
