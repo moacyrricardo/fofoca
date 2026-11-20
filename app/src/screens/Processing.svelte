@@ -29,7 +29,7 @@
       {@const st = state(s.id)}
       <div class="step {st}">
         <span class="st">{st === "done" ? "✓" : ""}</span>
-        <div><b>{s.title}</b>{#if st === "run" && live.progress?.step === s.id}<span class="pct"> · {Math.round(live.progress.progress * 100)}%</span>{/if}<div class="d">{s.detail}</div></div>
+        <div><b>{s.title}</b>{#if st === "run" && live.progress?.step === s.id}<span class="pct">&nbsp;· {Math.round(live.progress.progress * 100)}%</span>{/if}<div class="d">{s.detail}</div></div>
         <span class="chip" class:gpu={s.chip === "GPU"}>{s.chip}</span>
       </div>
     {/each}
