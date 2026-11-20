@@ -49,11 +49,15 @@
 </div>
 
 <style>
-  .storage { margin-top: 16px; max-width: 900px; }
+  .storage { margin-top: 16px; }
   h2 { margin: 0 0 4px; }
   .small { font-size: 13px; }
   .opt { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 13.5px; cursor: pointer; }
   .opt input[type="radio"] { accent-color: var(--teal); width: 16px; height: 16px; }
-  .days { width: 64px; padding: 3px 6px; margin: 0 4px; background: var(--navy); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+  /* WebKitGTK draws spinners that clip the value — hide them */
+  .days { width: 52px; height: 28px; padding: 2px 8px; margin: 0 6px; background: var(--navy); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; font: inherit; text-align: center; appearance: textfield; -moz-appearance: textfield; }
+  .days::-webkit-inner-spin-button, .days::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .days:disabled { opacity: .6; }
+  .days:focus { outline: none; border-color: var(--teal); }
   .usage { margin-top: 12px; }
 </style>
