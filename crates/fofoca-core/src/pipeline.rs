@@ -6,9 +6,11 @@ use std::time::Instant;
 
 use crate::config::Config;
 use crate::model::{Segment, Track};
+use crate::queue::{self, SliceQueue, ALWAYS_MERGE, MERGE_GAP_S, MERGE_MAX_S};
 use crate::servers::{Kind, ModelServer};
+use crate::slicer::{Slicer, SlicerConfig};
 use crate::store::Store;
-use crate::whisper::WhisperClient;
+use crate::whisper::{RawSegment, WhisperClient};
 use crate::{audio, diarize, speakers, tracks};
 
 /// The per-track rebuild after the call (spec 018); runs before speakers and notes.
@@ -54,44 +56,68 @@ impl Hooks<'_> {
 /// A loaded Whisper server and its client, handed between steps so it loads once.
 pub type Asr = Option<(ModelServer, WhisperClient)>;
 
-/// Transcribe a whole recording like a live session would (quiet-point chunks, VAD, prompt
-/// carry-over), as one `track`. Gives the GPU back between chunks if a recording starts.
+/// Transcribe a whole recording as one `track` (imports), through the same slicer and queue as a
+/// live session (spec 019) in rebuild mode. Gives the GPU back between requests if a recording
+/// starts.
 pub fn transcribe_samples(cfg: &Config, samples: &[i16], track: Track, hooks: &Hooks) -> Result<Vec<Segment>> {
-    transcribe_track(cfg, samples, track, hooks, &mut None, (STEP_TRANSCRIBE, 0.0, 1.0))
+    Ok(transcribe_tracks(cfg, &[(track, samples)], hooks, &mut None, (STEP_TRANSCRIBE, 0.0, 1.0))?.0)
 }
 
-/// [`transcribe_samples`] with a Whisper server that may already be loaded (kept loaded for the
-/// next caller), reporting progress as `step` over `from..to`.
-fn transcribe_track(cfg: &Config, samples: &[i16], track: Track, hooks: &Hooks, asr: &mut Asr, (step, from, to): (&str, f64, f64)) -> Result<Vec<Segment>> {
-    let sr = audio::SAMPLE_RATE as usize;
-    let chunk = cfg.chunk_seconds as usize * sr;
-    let (mut pos, mut prompt, mut out) = (0, String::new(), Vec::new());
-    while pos < samples.len() {
+/// [`slice_and_transcribe`] with Whisper, loaded only once there's speech and kept loaded in
+/// `asr` for the next caller; progress is reported as `step` over `from..to`.
+fn transcribe_tracks(cfg: &Config, tracks: &[(Track, &[i16])], hooks: &Hooks, asr: &mut Asr, (step, from, to): (&str, f64, f64)) -> Result<(Vec<Segment>, usize)> {
+    let progress = |done: f64| (hooks.progress)(step, from + (to - from) * done);
+    slice_and_transcribe(tracks, progress, |samples, prompt| {
         if (hooks.yield_gpu)() {
             *asr = None; // stops the server
             hooks.wait_for_gpu();
         }
-        (hooks.progress)(step, from + (to - from) * pos as f64 / samples.len() as f64);
-        let rest = &samples[pos..];
-        let n = audio::quiet_cut(&rest[..rest.len().min(chunk + 1)], &[], chunk, 3 * sr);
-        let offset = pos as f64 / sr as f64;
-        // Silent stretches aren't sent (Whisper hallucinates on them; a quiet mic is mostly
-        // noise), and Whisper isn't even loaded until something is.
-        if audio::has_speech(&rest[..n]) {
-            if asr.is_none() {
-                let server = ModelServer::start(Kind::Whisper, cfg, cfg.live_devices().0)?;
-                let client = WhisperClient::new(&server.base_url)?;
-                *asr = Some((server, client));
-            }
-            let Some((_, client)) = &asr else { unreachable!() };
-            for s in client.transcribe(audio::wav_bytes(&rest[..n]), &cfg.language, &prompt)? {
-                prompt = s.text.clone();
-                out.push(tracks::segment(s, track, offset));
-            }
+        if asr.is_none() {
+            let server = ModelServer::start(Kind::Whisper, cfg, cfg.live_devices().0)?;
+            let client = WhisperClient::new(&server.base_url)?;
+            *asr = Some((server, client));
         }
-        pos += n;
+        let Some((_, client)) = &asr else { unreachable!() };
+        client.transcribe(audio::wav_bytes(samples), &cfg.language, prompt)
+    })
+}
+
+/// Slice whole tracks at their own pauses (rebuild mode: no holding) and send them through one
+/// queue to `transcribe` (samples, prompt), earliest start first, merging same-track neighbours
+/// whenever possible (§6). Returns the lines by start and how many mic lines were dropped or cut
+/// as echoes; `progress` gets the share of audio done before each request.
+fn slice_and_transcribe(
+    tracks: &[(Track, &[i16])],
+    progress: impl Fn(f64),
+    mut transcribe: impl FnMut(&[i16], &str) -> Result<Vec<RawSegment>>,
+) -> Result<(Vec<Segment>, usize)> {
+    let sr = audio::SAMPLE_RATE as usize;
+    let mut queue = SliceQueue::default();
+    // the call first, so mic slices are compared with the call audio for echoes
+    let mut ordered: Vec<&(Track, &[i16])> = tracks.iter().collect();
+    ordered.sort_by_key(|(t, _)| *t != Track::Call);
+    for &&(track, samples) in &ordered {
+        if track == Track::Call {
+            queue.call_audio(samples);
+        }
+        let mut slicer = Slicer::new(track, SlicerConfig::rebuild());
+        for (i, piece) in samples.chunks(10 * sr).enumerate() {
+            slicer.push((i * 10) as f64, piece).into_iter().for_each(|s| queue.push(s));
+        }
+        slicer.finish().into_iter().for_each(|s| queue.push(s));
     }
-    Ok(out)
+    let total = queue.queued_s();
+    let (mut lines, mut echoes) = (Vec::new(), 0);
+    while let Some(req) = queue.next(ALWAYS_MERGE, MERGE_GAP_S, MERGE_MAX_S) {
+        progress((1.0 - (queue.queued_s() + (req.end_s - req.start_s)) / total.max(1e-9)).clamp(0.0, 1.0));
+        let (new, n) = queue::transcribe(&req, &lines, &mut transcribe)?;
+        queue.done(&req);
+        echoes += n;
+        for line in new {
+            tracks::insert_by_start(&mut lines, line);
+        }
+    }
+    Ok((lines, echoes))
 }
 
 /// What the per-track rebuild did.
@@ -102,10 +128,10 @@ pub enum Rebuild {
     Skipped(String),
 }
 
-/// Rebuild a meeting's transcript from its audio after the call (spec 018): transcribe each whole
-/// track on its own (mic = You, system audio = Call), merge by time, drop mic echoes, and replace
-/// the live transcript (kept as `transcript.live.jsonl`). Missing tracks are skipped; with no
-/// audio at all, nothing changes.
+/// Rebuild a meeting's transcript from its audio after the call (spec 018): transcribe each track
+/// on its own (mic = You, system audio = Call) through the slice queue (spec 019), drop mic
+/// echoes, and replace the live transcript (kept as `transcript.live.jsonl`). Missing tracks are
+/// skipped; with no audio at all, nothing changes.
 pub fn retranscribe(store: &Store, cfg: &Config, id: &str, hooks: &Hooks) -> Result<Rebuild> {
     retranscribe_with(store, cfg, id, hooks, &mut None)
 }
@@ -123,10 +149,8 @@ pub fn retranscribe_with(store: &Store, cfg: &Config, id: &str, hooks: &Hooks, a
     if total == 0.0 {
         return Ok(Rebuild::Skipped("The transcript wasn't rebuilt per track: the audio is no longer stored.".into()));
     }
-    let split = mic.len() as f64 / total;
-    let you = transcribe_track(cfg, &mic, Track::You, hooks, asr, (STEP_TRANSCRIPT, 0.0, split))?;
-    let call = transcribe_track(cfg, &sys, Track::Call, hooks, asr, (STEP_TRANSCRIPT, split, 1.0))?;
-    let (segments, echoes) = tracks::merge(you, call);
+    let present: Vec<(Track, &[i16])> = [(Track::You, mic.as_slice()), (Track::Call, sys.as_slice())].into_iter().filter(|(_, s)| !s.is_empty()).collect();
+    let (segments, echoes) = transcribe_tracks(cfg, &present, hooks, asr, (STEP_TRANSCRIPT, 0.0, 1.0))?;
     if segments.is_empty() && !store.live_transcript(id).unwrap_or_default().is_empty() {
         return Ok(Rebuild::Skipped("The per-track transcript came out empty; the live transcript is kept.".into()));
     }
@@ -296,6 +320,50 @@ mod tests {
         }
         assert!(store.load(&ro.id).unwrap().meta.steps_done.contains(&STEP_TRANSCRIPT.to_string()));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Spec 019 §6: the rebuild goes through the slicers and one queue. Two call turns 2 s apart
+    /// go out as one merged request, your reply between them as its own, the quiet echo of the
+    /// call on the mic is held until the call has its text and then dropped, and the lines come
+    /// back in start order with meeting times.
+    #[test]
+    fn rebuild_slices_both_tracks_through_one_queue() {
+        const SR: usize = audio::SAMPLE_RATE as usize;
+        let voice = |len: f64, turns: &[(f64, f64)], amp: i16| -> Vec<i16> {
+            (0..(len * SR as f64) as usize)
+                .map(|i| {
+                    let t = i as f64 / SR as f64;
+                    let on = turns.iter().any(|&(a, b)| t >= a && t < b) && i % (SR / 4) < SR * 15 / 100;
+                    let noise = ((i * 7919) % 301) as i16 - 150;
+                    if on { noise.saturating_add(if i % 2 == 0 { amp } else { -amp }) } else { noise }
+                })
+                .collect()
+        };
+        let call = voice(30.0, &[(1.0, 6.0), (8.0, 12.0)], 6000);
+        // your reply at 14–18 s, and the call heard through the speakers at −20 dB during 1–6 s
+        let mut mic = voice(30.0, &[(14.0, 18.0)], 6000);
+        for (m, c) in mic.iter_mut().zip(voice(30.0, &[(1.0, 6.0)], 600)).skip(SR / 2).take(6 * SR) {
+            *m = m.saturating_add(c);
+        }
+        let mut requests = Vec::new();
+        let (lines, echoes) = slice_and_transcribe(&[(Track::You, &mic), (Track::Call, &call)], |_| {}, |samples, prompt| {
+            let secs = samples.len() as f64 / SR as f64;
+            requests.push((secs.round(), prompt.to_string()));
+            let text = match requests.len() {
+                1 => "Bom dia, vamos começar pelo relatório.",
+                2 => "bom dia vamos começar pelo relatório",
+                _ => "Pode ser, eu mando hoje.",
+            };
+            Ok(vec![RawSegment { start: 0.1, end: secs - 0.1, text: text.into(), words: crate::whisper::approx_words(0.1, secs - 0.1, text) }])
+        })
+        .unwrap();
+        assert_eq!(requests.len(), 3, "{requests:?}");
+        assert!(requests[0].0 >= 11.0, "the two call turns in one request: {requests:?}");
+        assert_eq!(requests[1].1, "", "the echo starts before any text");
+        assert_eq!(requests[2].1, "Bom dia, vamos começar pelo relatório.", "the reply's prompt is what came before it");
+        assert_eq!(echoes, 1);
+        let got: Vec<(Track, f64)> = lines.iter().map(|l| (l.track, l.start.round())).collect();
+        assert_eq!(got, vec![(Track::Call, 1.0), (Track::You, 14.0)]);
     }
 
     /// Runs Whisper (spec 018): the per-track rebuild on a real mic + call pair, e.g. a recorded
