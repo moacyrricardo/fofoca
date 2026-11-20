@@ -61,6 +61,7 @@ impl ModelServer {
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
+        crate::proc::die_with_parent(&mut cmd);
         let child = cmd.spawn().with_context(|| {
             let bin = match kind {
                 Kind::Whisper => &cfg.whisper.server,

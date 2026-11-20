@@ -1200,6 +1200,7 @@ dependencies = [
  "hound",
  "kaldi-fbank",
  "keyring",
+ "libc",
  "ndarray",
  "ort",
  "reqwest 0.12.28",

@@ -13,6 +13,7 @@ pub mod llm;
 pub mod model;
 pub mod notes;
 pub mod pipeline;
+pub mod proc;
 pub mod prompts;
 pub mod servers;
 pub mod session;
