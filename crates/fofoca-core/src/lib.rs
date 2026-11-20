@@ -23,6 +23,7 @@ pub mod retention;
 pub mod prompts;
 pub mod servers;
 pub mod session;
+pub mod slicer;
 pub mod speakers;
 pub mod store;
 pub mod tracks;
