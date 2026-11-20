@@ -12,6 +12,7 @@ pub mod import;
 pub mod jobs;
 pub mod labels;
 pub mod llm;
+pub mod media;
 pub mod model;
 pub mod notes;
 pub mod pipeline;
