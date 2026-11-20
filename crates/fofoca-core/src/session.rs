@@ -536,7 +536,8 @@ impl Worker {
             if let Err(e) = self.store.append_segment(&self.meeting.id, &seg) {
                 self.error(format!("saving transcript: {e:#}"));
             }
-            self.segments.push(seg.clone());
+            // placed by start: the summary input reads them in that order (spec 019)
+            crate::tracks::insert_by_start(&mut self.segments, seg.clone());
             (self.emit)(SessionEvent::Segment { segment: seg });
         }
         true

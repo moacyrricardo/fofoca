@@ -28,6 +28,15 @@ pub fn drop_echoes(new: Vec<Segment>, known: &[Segment]) -> (Vec<Segment>, usize
     (kept, dropped)
 }
 
+/// Put `line` among `lines` (sorted by start) after every line starting at or before it, and
+/// return where it went (spec 019: lines arrive out of order, a long call turn can finish after
+/// your later reply). Equal starts keep their arrival order.
+pub fn insert_by_start(lines: &mut Vec<Segment>, line: Segment) -> usize {
+    let at = lines.partition_point(|l| l.start <= line.start);
+    lines.insert(at, line);
+    at
+}
+
 /// A Whisper line from `track`, moved by `offset` seconds.
 pub fn segment(r: RawSegment, track: Track, offset: f64) -> Segment {
     Segment {
@@ -140,6 +149,17 @@ mod tests {
         // a short overlap isn't enough either
         let late = line(Track::You, 40.4, 41.4, "sim");
         assert!(!is_echo(&late, &call), "20 % overlap");
+    }
+
+    #[test]
+    fn lines_are_inserted_by_start() {
+        let mut lines = vec![line(Track::Call, 0.0, 2.0, "Oi"), line(Track::You, 12.0, 13.0, "Combinado.")];
+        // their long turn finished after your later reply
+        assert_eq!(insert_by_start(&mut lines, line(Track::Call, 3.0, 11.5, "Então, sobre o contrato…")), 1);
+        assert_eq!(insert_by_start(&mut lines, line(Track::You, 12.0, 12.5, "Sim")), 3, "equal starts keep arrival order");
+        assert_eq!(insert_by_start(&mut lines, line(Track::You, 20.0, 21.0, "Tchau")), 4);
+        let order: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(order, vec!["Oi", "Então, sobre o contrato…", "Combinado.", "Sim", "Tchau"]);
     }
 
     #[test]

@@ -155,6 +155,22 @@ mod tests {
     }
 
     #[test]
+    fn a_long_call_turn_finishing_late_is_still_placed_at_its_start() {
+        // the call talks 2–19 s; you say a short thing at 5–7 s, which closes first
+        let mut q = SliceQueue::default();
+        let mut lines: Vec<Segment> = Vec::new();
+        q.push(slice(Track::You, 5.0, 7.0));
+        let you = q.next(BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S).unwrap();
+        lines.extend(transcribe(&you, &lines, |s, _| Ok(fake_whisper(s, &["Uhum, sim."]))).unwrap().0);
+        q.push(slice(Track::Call, 2.0, 19.0));
+        let call = q.next(BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S).unwrap();
+        for l in transcribe(&call, &lines, |s, _| Ok(fake_whisper(s, &["Então, a proposta é a seguinte."]))).unwrap().0 {
+            assert_eq!(tracks::insert_by_start(&mut lines, l), 0, "goes before your reply");
+        }
+        assert_eq!(lines.iter().map(|l| (l.track, l.start)).collect::<Vec<_>>(), vec![(Track::Call, 2.0), (Track::You, 5.0)]);
+    }
+
+    #[test]
     fn merges_only_when_behind_and_only_the_same_track() {
         let queue = || {
             let mut q = SliceQueue::default();

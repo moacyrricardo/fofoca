@@ -249,7 +249,10 @@ function startFake(title: string, labels: string[]): MeetingMeta {
   const meta = live;
   queueMicrotask(() => emit({ type: "started", meeting: meta }));
   timers.push(window.setInterval(() => emit(status(0, "ready", "off")), 250));
-  if (config.config.workflow?.live_transcript !== false) segs.forEach((s, i) => timers.push(window.setTimeout(() => emit({ type: "segment", segment: s }), 1500 + i * 1700)));
+  // Spec 019: lines arrive out of order — the call's line at 00:32 comes after your later reply
+  // (00:40), as when a long call turn finishes transcribing late; the live view puts it back.
+  const arrival = (i: number) => (i === 4 ? 5 : i === 5 ? 4 : i);
+  if (config.config.workflow?.live_transcript !== false) segs.forEach((s, i) => timers.push(window.setTimeout(() => emit({ type: "segment", segment: s }), 1500 + arrival(i) * 1700)));
   return meta;
 }
 

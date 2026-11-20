@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, onJob, onQuitRequested, onSession, preview } from "./lib/api";
   import { live, resetLive } from "./lib/live.svelte";
+  import { insertByStart } from "./lib/transcript";
   import type { CalendarEvent, ConfigView, JobEvent, MeetingMeta, SessionEvent } from "./lib/types";
   import { shortModel } from "./lib/format";
   import Meetings from "./screens/Meetings.svelte";
@@ -106,7 +107,8 @@
         break;
       }
       case "segment":
-        live.segments.push(e.segment);
+        // lines arrive out of order (spec 019): place each by its start time
+        insertByStart(live.segments, e.segment);
         break;
       case "paused":
         live.pauses.push(e.at_s);
