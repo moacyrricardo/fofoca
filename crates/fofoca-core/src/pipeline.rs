@@ -298,6 +298,56 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// Runs Whisper (spec 018): the per-track rebuild on a real mic + call pair, e.g. a recorded
+    /// meeting's `mic.wav` and `system.wav`.
+    /// `FOFOCA_MIC_WAV=<mic.wav> FOFOCA_CALL_WAV=<system.wav> cargo test -p fofoca-core -- --ignored per_track_rebuild --nocapture`
+    #[test]
+    #[ignore]
+    fn per_track_rebuild_on_a_real_recording() {
+        let (mic, call) = (std::env::var("FOFOCA_MIC_WAV").expect("set FOFOCA_MIC_WAV"), std::env::var("FOFOCA_CALL_WAV").expect("set FOFOCA_CALL_WAV"));
+        let root = std::env::temp_dir().join(format!("fofoca-rebuild-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::new(&root).unwrap();
+        let meta = store.create(&StartInfo { title: "per track".into(), ..Default::default() }).unwrap();
+        std::fs::copy(&mic, store.dir(&meta.id).join("mic.wav")).unwrap();
+        std::fs::copy(&call, store.dir(&meta.id).join("system.wav")).unwrap();
+        // a live transcript as the mixed path made it: one line, guessed as Call
+        let live = Segment { start: 0.0, end: 5.0, text: "linha ao vivo".into(), track: Track::Call, words: vec![], speaker: None };
+        store.append_segment(&meta.id, &live).unwrap();
+        let (progress, yield_gpu) = no_hooks();
+        let hooks = Hooks { progress: &progress, yield_gpu: &yield_gpu };
+        let r = retranscribe(&store, &Config::default(), &meta.id, &hooks).unwrap();
+        eprintln!("{r:?}");
+        let m = store.load(&meta.id).unwrap();
+        let (mic_s, call_s) = (audio::read_wav(mic.as_ref()).unwrap(), audio::read_wav(call.as_ref()).unwrap());
+        let level = |v: &[i16], s: &Segment| {
+            let (a, b) = ((s.start * 16_000.0) as usize, (s.end * 16_000.0) as usize);
+            audio::rms(&v[a.min(v.len())..b.min(v.len())])
+        };
+        let span = |v: &[i16], s: &Segment| v[((s.start * 16_000.0) as usize).min(v.len())..((s.end * 16_000.0) as usize).min(v.len())].to_vec();
+        let (mut louder, mut voiced) = (0, 0);
+        for s in &m.segments {
+            let (own, other) = match s.track {
+                Track::You => (&mic_s, &call_s),
+                Track::Call => (&call_s, &mic_s),
+            };
+            let (lo, lt) = (level(own, s), level(other, s));
+            louder += usize::from(lo > lt);
+            voiced += usize::from(audio::has_speech(&span(own, s)));
+            eprintln!("{:6.1}-{:6.1} {:?} own {lo:.3} other {lt:.3}  {}", s.start, s.end, s.track, s.text);
+        }
+        // A line can span several of one person's turns (VAD drops the other person's turns from
+        // each track), so "louder over the whole line" is only a diagnostic.
+        eprintln!("{louder}/{} lines louder on their own track", m.segments.len());
+        assert!(m.segments.iter().any(|s| s.track == Track::You) && m.segments.iter().any(|s| s.track == Track::Call), "both tracks speak");
+        assert!(m.segments.windows(2).all(|w| w[0].start <= w[1].start), "merged by time");
+        assert_eq!(voiced, m.segments.len(), "every line has speech on its own track where it says it is");
+        assert_eq!(store.live_transcript(&meta.id).unwrap(), vec![live], "live copy kept");
+        assert_eq!(store.base_transcript(&meta.id).unwrap(), m.segments);
+        assert!(m.meta.steps_done.contains(&STEP_TRANSCRIPT.to_string()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// Runs the real models. `FOFOCA_DIAR_WAV=<16 kHz mono wav> cargo test -- --ignored speakers_step`
     /// (pyannote-rs' public `6_speakers.wav` works); models from the default config paths.
     #[test]
