@@ -1,3 +1,6 @@
+Status: done
+Branch: moacyrricardo/spec-014-replay
+
 # 014 — Replay: listen to a meeting with the transcript following along
 
 > **Design reference:** [`014-assets/replay-mock.html`](014-assets/replay-mock.html) — clickable mock
@@ -69,3 +72,39 @@ transcript timeline; imports (012) have only a call track.
 - No waveform; no per-speaker mute (only You / Call tracks exist as audio).
 - Playing while recording another meeting isn't blocked (it only uses the speakers, not the GPU).
 - Word highlight drifts within long lines while word timings are interpolated.
+
+## Implementation Notes
+
+- **Core**: `Store::audio_tracks(id)` (store.rs) returns the `mic.wav` / `system.wav` that exist and
+  refuses any id that isn't a plain folder name (letters, digits, `-`, `_`) with a `meta.json`, so
+  `..`, absolute paths and folders outside the store are rejected. The Tauri command is a thin
+  wrapper. Tauri: `protocol-asset` feature, `assetProtocol.enable` with an empty static scope, the
+  meetings folder allowed at startup, and `media-src 'self' asset: http://asset.localhost` in the CSP.
+- **UI**: `lib/replay.ts` (pure: `resync`, `nextRate`, `lineAt`, `wordTimes`, `wordAt`,
+  `timeAtX`, `laneBlocks`), `lib/player.svelte.ts` (shared state + the two `Audio` elements),
+  `Player.svelte`, `MiniPlayer.svelte`, wiring in `MeetingView.svelte`.
+- **Tests**: `npm test` in `app/`. The distro's Node 22 is built without TypeScript stripping, so the
+  script bundles `*.test.ts` with the esbuild that ships with Vite into `app/.test-build/`
+  (gitignored) and runs Node's built-in test runner — no new dependency. Test files are excluded
+  from `svelte-check` (no `@types/node`). Rust: `audio_tracks` test (existing files, refused ids).
+- **Differences from the spec**:
+  - Only the *playing* line is rendered as word spans; the other lines stay plain text, so a word
+    change re-renders one line instead of every word in the meeting.
+  - "Scrolled away" is detected from wheel, touch and PageUp/PageDown/Home/End; dragging the
+    scrollbar doesn't count (see Known Gaps).
+  - Space / ← / → are ignored while focus is in a field or on a button (a focused button takes
+    Space itself).
+  - The fake backend serves generated WAVs as blob URLs (not data URLs): a hum with syllable-like
+    bursts where each track speaks, one pitch per voice.
+  - No bar for an unfinished meeting (the files are still being written). A finished meeting with
+    no audio files that retention didn't delete says "No audio was kept for this meeting".
+  - The mini player is fixed to the bottom of the content area; App exposes `--side-w` (sidebar
+    width) so it centres without hard-coding it.
+- **Verified**: browser preview driven headlessly (Chromium over CDP): play, word highlight, click a
+  line to play from it, mute Call dims its 5 lines, Space toggles, mini player on the Summary tab,
+  "go to transcript", deleting the audio swaps the bar for the deleted line.
+- **Not verified yet**: the real Tauri webview (WebKitGTK) streaming `mic.wav` / `system.wav`
+  through the asset protocol, drift between the two tracks over a long call, and an import (call
+  track only) — needs `cargo tauri dev` with a real meeting.
+- Known gap added: dragging the scrollbar while Follow is on doesn't pause auto-scroll; the next
+  line change scrolls back.
