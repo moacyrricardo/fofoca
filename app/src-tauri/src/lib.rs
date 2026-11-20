@@ -21,6 +21,7 @@ struct AppState {
     cfg: RwLock<Config>,
     store: Store,
     session: Mutex<Option<Session>>,
+    starting: Mutex<()>,
     quit_after_save: AtomicBool,
     calendars: Calendars<Keyring>,
     /// Serves replay audio (spec 014 fix).
@@ -264,22 +265,26 @@ fn start_session(
     labels: Option<Vec<String>>,
     calendar_uid: Option<String>,
 ) -> CmdResult<MeetingMeta> {
-    start_recording(&app, StartInfo {
+    start_recording(&app, |_| StartInfo {
         title, attendees: attendees.unwrap_or_default(), labels: labels.unwrap_or_default(),
         calendar_uid, ..Default::default()
     })
 }
 
-fn start_recording(app: &AppHandle, mut info: StartInfo) -> CmdResult<MeetingMeta> {
+fn start_recording(app: &AppHandle, info: impl FnOnce(&AppState) -> StartInfo) -> CmdResult<MeetingMeta> {
     let state = app.state::<AppState>();
+    // Reserve before calendar I/O. Keep the session slot available to UI queries
+    // and reject overlapping starts instead of queuing a second meeting.
+    let _starting = state.starting.try_lock().map_err(|_| "a recording is already starting")?;
+    if state.session.lock().unwrap().is_some() {
+        return Err("a recording is already running".into());
+    }
+    let mut info = info(&state);
     // spec 009: a recurring meeting gets the labels its last recording had
     if let Some(uid) = info.calendar_uid.as_deref() {
         info.labels.extend(state.store.labels_for_series(uid).unwrap_or_default());
     }
     let mut slot = state.session.lock().unwrap();
-    if slot.is_some() {
-        return Err("a recording is already running".into());
-    }
     let handle = app.clone();
     let sink = Arc::new(move |e: SessionEvent| {
         if matches!(e, SessionEvent::Finished { .. } | SessionEvent::Discarded { .. }) {
@@ -481,7 +486,7 @@ pub fn run() {
             );
             // Replay (spec 014): meeting audio over loopback HTTP, token-guarded, meeting audio only.
             let media = fofoca_core::media::MediaServer::start(store.clone())?;
-            app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), quit_after_save: AtomicBool::new(false), calendars, upcoming: Mutex::new(None), jobs, media, settings: Default::default() });
+            app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), starting: Mutex::new(()), quit_after_save: AtomicBool::new(false), calendars, upcoming: Mutex::new(None), jobs, media, settings: Default::default() });
             if let Err(error) = tray::setup(app.handle()) {
                 eprintln!("tray unavailable: {error}");
             }

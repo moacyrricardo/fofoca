@@ -258,10 +258,10 @@ fn action(app: &AppHandle, id: &str) -> CmdResult<()> {
             let handle = app.clone();
             // Calendar I/O must not block the desktop event loop.
             tauri::async_runtime::spawn_blocking(move || {
-                let upcoming = fetch_upcoming(&handle.state::<AppState>(), false);
-                if let Err(error) =
-                    start_recording(&handle, start_info(upcoming.events, Utc::now()))
-                {
+                if let Err(error) = start_recording(&handle, |state| {
+                    let upcoming = fetch_upcoming(state, false);
+                    start_info(upcoming.events, Utc::now())
+                }) {
                     report_error(&handle, error);
                 }
             });
