@@ -10,8 +10,12 @@
 //! A Whisper request costs about the same however short its audio (the encoder always runs over a
 //! 30 s window), so with no backlog small slices go out alone for low latency, and when behind
 //! they are merged to catch up.
+//!
+//! Without headphones the mic hears the call. A mic slice that is much quieter than call audio
+//! not transcribed yet is held until that call audio has its lines (Decision 6), so the echo check
+//! (`tracks::drop_echoes`) sees both texts.
 
-use crate::audio::SAMPLE_RATE;
+use crate::audio::{self, SAMPLE_RATE};
 use crate::model::{Segment, Track};
 use crate::slicer::Slice;
 use crate::tracks;
@@ -26,7 +30,16 @@ pub const MERGE_MAX_S: f64 = 28.0;
 /// As `backlog_s`: merge whenever possible (the after-call rebuild has no latency to protect).
 pub const ALWAYS_MERGE: f64 = f64::NEG_INFINITY;
 
+/// A mic slice is held as a likely echo when call audio without text yet covers at least this
+/// share of it…
+const ECHO_OVERLAP: f64 = 0.5;
+/// …and the mic is below this share of the call's level there. Your own voice is 30–800× louder
+/// on the mic than the call is (measured, spec 018); an echo is quieter than the call.
+const ECHO_LEVEL: f64 = 0.25;
+
 const SR: f64 = SAMPLE_RATE as f64;
+/// Level windows, as the slicer's (50 ms).
+const WIN: usize = SAMPLE_RATE as usize / 20;
 
 /// One Whisper request: one slice, or several of one track joined.
 #[derive(Debug, Clone, PartialEq)]
@@ -56,28 +69,102 @@ pub struct QueueStats {
     pub requests: usize,
     /// Requests made of more than one slice.
     pub merged: usize,
+    /// Mic slices held back as a likely echo of the call.
+    pub held_echo: usize,
 }
 
 /// Ready slices from both tracks, waiting for the Whisper worker.
 #[derive(Default)]
 pub struct SliceQueue {
     ready: Vec<Slice>,
+    /// Mic slices that sound like an echo of call audio without text yet; they wait for it.
+    held: Vec<Slice>,
+    /// Call slices queued or being transcribed: `(start_s, end_s)`.
+    call_pending: Vec<(f64, f64)>,
+    /// Where the call slicer's open or held audio starts (it runs on to now).
+    call_open_from: Option<f64>,
+    /// The call track's 50 ms levels from t = 0, and samples short of a full window.
+    call_levels: Vec<f32>,
+    call_rest: Vec<i16>,
     pub stats: QueueStats,
 }
 
 impl SliceQueue {
+    /// Queue a closed slice. Call slices are fed before the mic slices of the same moment, so a
+    /// mic slice can be compared with them.
     pub fn push(&mut self, s: Slice) {
         match s.track {
             Track::You => self.stats.you_slices += 1,
             Track::Call => self.stats.call_slices += 1,
         }
+        if s.track == Track::Call {
+            self.call_pending.push((s.start_s, s.end_s));
+        } else if self.sounds_like_echo(&s) {
+            self.stats.held_echo += 1;
+            self.held.push(s);
+            return;
+        }
         self.ready.push(s);
+    }
+
+    /// The call track as it is captured (all of it, from t = 0), for the echo levels.
+    pub fn call_audio(&mut self, samples: &[i16]) {
+        self.call_rest.extend_from_slice(samples);
+        let whole = self.call_rest.len() / WIN * WIN;
+        self.call_levels.extend(self.call_rest[..whole].chunks(WIN).map(audio::rms));
+        self.call_rest.drain(..whole);
+    }
+
+    /// Where the call slicer's audio not yet queued starts (`Slicer::pending_from`).
+    pub fn set_call_open(&mut self, from_s: Option<f64>) {
+        self.call_open_from = from_s;
+    }
+
+    /// `req` has been transcribed (or failed): its call audio has its lines now, so mic slices
+    /// waiting on it can go.
+    pub fn done(&mut self, req: &Request) {
+        if req.track == Track::Call {
+            self.call_pending.retain(|&(a, b)| a < req.start_s - 1e-9 || b > req.end_s + 1e-9);
+        }
+    }
+
+    /// Call audio without text yet: queued or in-flight slices, and the open one.
+    fn call_waiting(&self) -> Vec<(f64, f64)> {
+        self.call_pending.iter().copied().chain(self.call_open_from.map(|f| (f, f64::INFINITY))).collect()
+    }
+
+    /// Whether mic slice `m` overlaps call audio without text yet by ≥ 50 % of its length while
+    /// the mic is < 0.25× the call's level over that overlap.
+    fn sounds_like_echo(&self, m: &Slice) -> bool {
+        let waiting = self.call_waiting();
+        let (mut windows, mut overlap, mut mic, mut call) = (0usize, 0usize, 0.0f64, 0.0f64);
+        for (i, w) in m.samples.chunks(WIN).enumerate() {
+            windows += 1;
+            let t = m.start_s + (i as f64 + 0.5) * WIN as f64 / SR;
+            if !waiting.iter().any(|&(a, b)| t >= a && t < b) {
+                continue;
+            }
+            overlap += 1;
+            let Some(&c) = self.call_levels.get((t * SR) as usize / WIN) else { continue };
+            mic += (audio::rms(w) as f64).powi(2);
+            call += (c as f64).powi(2);
+        }
+        overlap as f64 >= ECHO_OVERLAP * windows as f64 && call > 0.0 && (mic / call).sqrt() < ECHO_LEVEL
+    }
+
+    /// Held mic slices whose call audio all has its lines go to the ready ones.
+    fn release(&mut self) {
+        let waiting = self.call_waiting();
+        let (go, stay): (Vec<Slice>, Vec<Slice>) = self.held.drain(..).partition(|m| !waiting.iter().any(|&(a, b)| m.start_s < b && a < m.end_s));
+        self.held = stay;
+        self.ready.extend(go);
     }
 
     /// The next request: the ready slice with the earliest start, joined with the next queued
     /// slices of the same track when more than `backlog_s` of audio is queued. `None` if nothing
     /// is ready.
     pub fn next(&mut self, backlog_s: f64, merge_gap_s: f64, merge_max_s: f64) -> Option<Request> {
+        self.release();
         let behind = self.queued_s() > backlog_s;
         let first = (0..self.ready.len()).min_by(|&a, &b| self.ready[a].start_s.total_cmp(&self.ready[b].start_s))?;
         let s = self.ready.remove(first);
@@ -106,18 +193,19 @@ impl SliceQueue {
         Some(req)
     }
 
-    /// Seconds of audio waiting.
+    /// Seconds of audio waiting, held echoes included.
     pub fn queued_s(&self) -> f64 {
-        self.ready.iter().map(Slice::len_s).sum()
+        self.ready.iter().chain(&self.held).map(Slice::len_s).sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ready.is_empty()
+        self.ready.is_empty() && self.held.is_empty()
     }
 }
 
 /// Send one request to `transcribe` (given the samples and the prompt) and return its lines in
-/// meeting time, without mic lines that only repeat the call lines already in `lines`.
+/// meeting time, without mic lines (or the ends of mic lines) that only repeat the call lines
+/// already in `lines`.
 pub fn transcribe(
     req: &Request,
     lines: &[Segment],
@@ -151,7 +239,7 @@ mod tests {
         assert_eq!(q.queued_s(), 14.0);
         assert_eq!(take_all(&mut q, BACKLOG_S), vec![(Track::Call, 4.0, 11.0, 1), (Track::You, 12.0, 15.0, 1), (Track::Call, 16.0, 20.0, 1)]);
         assert!(q.is_empty() && q.next(BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S).is_none());
-        assert_eq!(q.stats, QueueStats { you_slices: 1, call_slices: 2, requests: 3, merged: 0 });
+        assert_eq!(q.stats, QueueStats { you_slices: 1, call_slices: 2, requests: 3, merged: 0, held_echo: 0 });
     }
 
     #[test]
@@ -264,5 +352,93 @@ mod tests {
         }
         let got: Vec<(Track, &str, f64)> = lines.iter().map(|s| (s.track, s.text.as_str(), s.start.round())).collect();
         assert_eq!(got, vec![(Track::Call, "Oi, como vai?", 60.0), (Track::You, "tudo certo?", 62.0)]);
+    }
+
+    /// Voice-like audio at `amp` over `a..b` within a track of `len` s (150 ms syllables).
+    fn voiced(len: f64, a: f64, b: f64, amp: i16) -> Vec<i16> {
+        (0..(len * SR) as usize)
+            .map(|i| {
+                let t = i as f64 / SR;
+                if t >= a && t < b && i % (SRU / 4) < SRU * 15 / 100 { if i % 2 == 0 { amp } else { -amp } } else { 0 }
+            })
+            .collect()
+    }
+
+    fn cut(track: Track, samples: &[i16], a: f64, b: f64) -> Slice {
+        Slice { track, start_s: a, end_s: b, samples: samples[(a * SR) as usize..(b * SR) as usize].to_vec() }
+    }
+
+    #[test]
+    fn an_echo_waits_for_the_call_text_and_is_dropped() {
+        // the call speaks at 10–13 s; the mic hears it through the speakers at −20 dB
+        let call = voiced(20.0, 10.0, 13.0, 6000);
+        let mic = voiced(20.0, 10.0, 13.0, 600);
+        let mut q = SliceQueue::default();
+        q.call_audio(&call);
+        q.push(cut(Track::Call, &call, 9.8, 13.2));
+        q.push(cut(Track::You, &mic, 9.9, 13.3));
+        assert_eq!(q.stats.held_echo, 1);
+        assert!((q.queued_s() - 6.8).abs() < 1e-9, "held audio is backlog too");
+        let text = "A gente fecha o relatório na sexta.";
+        let mut lines: Vec<Segment> = Vec::new();
+        let call_req = q.next(BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S).unwrap();
+        assert_eq!(call_req.track, Track::Call);
+        assert!(q.next(BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S).is_none(), "the mic waits while the call is transcribed");
+        lines.extend(transcribe(&call_req, &lines, |s, _| Ok(fake_whisper(s, &[text]))).unwrap().0);
+        q.done(&call_req);
+        let mic_req = q.next(BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S).expect("released once the call has its text");
+        let (kept, echoes) = transcribe(&mic_req, &lines, |s, _| Ok(fake_whisper(s, &["a gente fecha o relatório na sexta"]))).unwrap();
+        assert!(kept.is_empty());
+        assert_eq!(echoes, 1);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn a_real_reply_over_a_quiet_call_is_not_held() {
+        // they murmur at −20 dB on the call while you answer, loud, on the mic
+        let call = voiced(20.0, 10.0, 13.0, 600);
+        let mic = voiced(20.0, 10.5, 13.0, 6000);
+        let mut q = SliceQueue::default();
+        q.call_audio(&call);
+        q.push(cut(Track::Call, &call, 9.8, 13.2));
+        q.push(cut(Track::You, &mic, 10.3, 13.2));
+        assert_eq!(q.stats.held_echo, 0);
+        // a quiet mic with no call audio pending (already transcribed) isn't held either
+        let mut q = SliceQueue::default();
+        q.call_audio(&voiced(20.0, 10.0, 13.0, 6000));
+        q.push(cut(Track::You, &voiced(20.0, 10.0, 13.0, 600), 9.9, 13.3));
+        assert_eq!(q.stats.held_echo, 0);
+    }
+
+    #[test]
+    fn a_held_mic_slice_waits_for_the_open_call_slice() {
+        let call = voiced(20.0, 9.0, 20.0, 6000);
+        let mic = voiced(20.0, 10.0, 12.0, 600);
+        let mut q = SliceQueue::default();
+        q.call_audio(&call);
+        q.set_call_open(Some(8.8)); // the call is still talking
+        q.push(cut(Track::You, &mic, 9.8, 12.2));
+        assert!(q.next(BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S).is_none());
+        // the call slice closes and is queued: it goes first, then the mic
+        q.set_call_open(None);
+        q.push(cut(Track::Call, &call, 8.8, 20.0));
+        let first = q.next(BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S).unwrap();
+        assert_eq!(first.track, Track::Call);
+        q.done(&first);
+        assert_eq!(q.next(BACKLOG_S, MERGE_GAP_S, MERGE_MAX_S).unwrap().track, Track::You);
+    }
+
+    #[test]
+    fn a_turn_glued_to_an_echo_keeps_the_turn() {
+        // Whisper wrote the echo of their line and your answer as one mic line
+        let call = Segment { start: 10.0, end: 13.0, text: "A gente fecha o relatório na sexta.".into(), track: Track::Call, words: vec![], speaker: None };
+        let req = Request { track: Track::You, start_s: 10.0, end_s: 16.0, samples: vec![1; 6 * SRU], slices: 1 };
+        let text = "a gente fecha o relatório na sexta combinado então eu mando amanhã";
+        let (kept, echoes) = transcribe(&req, std::slice::from_ref(&call), |_, _| Ok(vec![RawSegment { start: 0.2, end: 6.0, text: text.into(), words: crate::whisper::approx_words(0.2, 6.0, text) }])).unwrap();
+        assert_eq!(echoes, 1);
+        assert_eq!(kept.len(), 1, "your words survive");
+        assert_eq!(kept[0].text, "combinado então eu mando amanhã");
+        assert!(kept[0].start > 12.0 && (kept[0].end - 16.0).abs() < 1e-9);
+        assert_eq!(kept[0].words.len(), 5);
     }
 }

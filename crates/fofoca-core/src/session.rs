@@ -404,20 +404,25 @@ impl Worker {
                 let s = self.sys.buffer.take(n);
                 mic_wav.append(&m)?;
                 sys_wav.append(&s)?;
+                let len = m.len().max(s.len());
                 if live {
+                    // the call first: a quiet mic slice under call audio without text yet is held
+                    // as a likely echo until that call audio is transcribed (spec 019)
                     let t = self.offset_s;
-                    for (slicer, samples) in slicers.iter_mut().zip([&m, &s]) {
-                        slicer.push(t, samples).into_iter().for_each(|x| queue.push(x));
-                    }
+                    queue.call_audio(&s);
+                    queue.call_audio(&vec![0; len - s.len()]); // keep the levels on the timeline
+                    slicers[1].push(t, &s).into_iter().for_each(|x| queue.push(x));
+                    queue.set_call_open(slicers[1].pending_from());
+                    slicers[0].push(t, &m).into_iter().for_each(|x| queue.push(x));
                 }
-                self.offset_s += m.len().max(s.len()) as f64 / SAMPLE_RATE as f64;
+                self.offset_s += len as f64 / SAMPLE_RATE as f64;
             }
             if stopping || flush {
                 // a pause or the end closes every slice: nothing is held across it
                 flush = false;
-                for slicer in &mut slicers {
-                    slicer.finish().into_iter().for_each(|x| queue.push(x));
-                }
+                slicers[1].finish().into_iter().for_each(|x| queue.push(x));
+                queue.set_call_open(None);
+                slicers[0].finish().into_iter().for_each(|x| queue.push(x));
             }
             *self.shared.queued_s.lock().unwrap() = queue.queued_s() + slicers.iter().map(Slicer::pending_s).sum::<f64>();
             if live && self.transcribe_next(&mut queue) {
@@ -517,11 +522,15 @@ impl Worker {
         if self.asr.is_none() {
             self.start_asr();
         }
-        let Some((_, client)) = &self.asr else { return true }; // the error is shown; audio is kept
+        let Some((_, client)) = &self.asr else {
+            queue.done(&req); // the error is shown; the audio is kept
+            return true;
+        };
         self.set(Kind::Whisper, ModelState::Busy);
         let lang = self.cfg.language.clone();
         let out = queue::transcribe(&req, &self.segments, |samples, prompt| client.transcribe(audio::wav_bytes(samples), &lang, prompt));
         self.set(Kind::Whisper, ModelState::Ready);
+        queue.done(&req);
         let (lines, echoes) = match out {
             Ok(x) => x,
             Err(e) => {
@@ -530,7 +539,7 @@ impl Worker {
             }
         };
         if echoes > 0 {
-            eprintln!("fofoca: {:.0}–{:.0} s: dropped {echoes} mic line(s) echoing the call", req.start_s, req.end_s);
+            eprintln!("fofoca: {:.0}–{:.0} s: dropped or cut {echoes} mic line(s) echoing the call", req.start_s, req.end_s);
         }
         for seg in lines {
             if let Err(e) = self.store.append_segment(&self.meeting.id, &seg) {

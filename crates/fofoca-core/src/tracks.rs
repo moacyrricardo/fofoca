@@ -20,12 +20,63 @@ pub fn tail_chars(s: &str, n: usize) -> String {
 }
 
 /// Lines from one request, without mic lines that only repeat a call line already in `known`.
-/// Returns the kept lines and how many were dropped as echoes.
+/// A mic line that starts or ends with such a repeat (your turn glued to an echo, spec 019) loses
+/// just those words: lines are dropped, not whole requests, and your words are kept. Returns the
+/// kept lines and how many were dropped or cut as echoes.
 pub fn drop_echoes(new: Vec<Segment>, known: &[Segment]) -> (Vec<Segment>, usize) {
-    let before = new.len();
-    let kept: Vec<Segment> = new.into_iter().filter(|m| m.track != Track::You || !known.iter().any(|c| c.track == Track::Call && is_echo(m, c))).collect();
-    let dropped = before - kept.len();
-    (kept, dropped)
+    let mut echoes = 0;
+    let mut kept = Vec::with_capacity(new.len());
+    for line in new {
+        if line.track == Track::You && known.iter().any(|c| c.track == Track::Call && is_echo(&line, c)) {
+            echoes += 1;
+        } else if let Some(cut) = (line.track == Track::You).then(|| strip_echo(&line, known)).flatten() {
+            echoes += 1;
+            kept.push(cut);
+        } else {
+            kept.push(line);
+        }
+    }
+    (kept, echoes)
+}
+
+/// Fewer repeated words than this at a line's start or end is chance ("o", "sim", "a gente").
+const ECHO_RUN: usize = 3;
+/// Word times inside a line are interpolated, not measured: allow this much (s) around a call line.
+const ECHO_SLACK: f64 = 1.0;
+
+/// Mic line `m` without the words at its start or end that repeat an overlapping call line, if
+/// there are at least [`ECHO_RUN`] of them and something is left. `None` = nothing to cut, or it
+/// can't be split (then the whole line is kept: losing your words is worse than showing an echo).
+fn strip_echo(m: &Segment, known: &[Segment]) -> Option<Segment> {
+    let calls: Vec<(f64, f64, Vec<String>)> = known
+        .iter()
+        .filter(|c| c.track == Track::Call && c.start < m.end + ECHO_SLACK && m.start < c.end + ECHO_SLACK)
+        .map(|c| (c.start - ECHO_SLACK, c.end + ECHO_SLACK, words(&c.text)))
+        .collect();
+    if calls.is_empty() || m.words.len() <= ECHO_RUN {
+        return None;
+    }
+    let repeats = |w: &Word| {
+        let (mid, said) = ((w.start + w.end) / 2.0, words(&w.text));
+        !said.is_empty() && calls.iter().any(|(a, b, theirs)| mid >= *a && mid <= *b && said.iter().all(|x| theirs.contains(x)))
+    };
+    let n = m.words.len();
+    let front = m.words.iter().take_while(|w| repeats(w)).count();
+    let back = m.words.iter().rev().take_while(|w| repeats(w)).count();
+    let from = if front >= ECHO_RUN { front } else { 0 };
+    let to = if back >= ECHO_RUN { n - back } else { n };
+    if from >= to || (from == 0 && to == n) {
+        return None;
+    }
+    let kept = m.words[from..to].to_vec();
+    Some(Segment {
+        start: kept[0].start,
+        end: kept[kept.len() - 1].end,
+        text: kept.iter().map(|w| w.text.as_str()).collect::<String>().trim().to_string(),
+        words: kept,
+        track: m.track,
+        speaker: m.speaker.clone(),
+    })
 }
 
 /// Put `line` among `lines` (sorted by start) after every line starting at or before it, and
@@ -178,6 +229,33 @@ mod tests {
         // call lines are never dropped
         let call = vec![line(Track::Call, 10.2, 13.1, "a gente fecha o relatório na sexta")];
         assert_eq!(drop_echoes(call.clone(), &known), (call, 0));
+    }
+
+    fn worded(track: Track, start: f64, end: f64, text: &str) -> Segment {
+        Segment { start, end, text: text.into(), track, words: crate::whisper::approx_words(start, end, text), speaker: None }
+    }
+
+    #[test]
+    fn an_echo_glued_after_your_turn_is_cut_off() {
+        let call = worded(Track::Call, 14.0, 17.0, "Então manda o contrato amanhã cedo.");
+        let glued = worded(Track::You, 9.0, 17.0, "Pode deixar comigo que eu vejo isso hoje então manda o contrato amanhã cedo");
+        assert!(!is_echo(&glued, &call), "not an echo as a whole");
+        let (kept, echoes) = drop_echoes(vec![glued], std::slice::from_ref(&call));
+        assert_eq!((kept.len(), echoes), (1, 1));
+        assert_eq!(kept[0].text, "Pode deixar comigo que eu vejo isso hoje");
+        assert!((kept[0].start - 9.0).abs() < 1e-9 && kept[0].end < 14.0);
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_split_is_kept_whole() {
+        // only two words repeat at the start ("a gente"): could be chance, keep everything
+        let call = worded(Track::Call, 10.0, 12.0, "A gente vê depois.");
+        let mine = worded(Track::You, 10.5, 14.0, "a gente fecha o relatório na sexta");
+        assert_eq!(drop_echoes(vec![mine.clone()], std::slice::from_ref(&call)), (vec![mine], 0));
+        // repeated words in the middle only: no clean cut, keep it
+        let call = worded(Track::Call, 10.0, 14.0, "fecha o relatório");
+        let mine = worded(Track::You, 10.0, 14.0, "eu acho que fecha o relatório sim mas depois");
+        assert_eq!(drop_echoes(vec![mine.clone()], std::slice::from_ref(&call)).1, 0);
     }
 
     #[test]
