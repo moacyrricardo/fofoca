@@ -20,4 +20,4 @@
 | 016 | done   | tasks-view                  | moacyrricardo/spec-016-tasks-view       | —     | filtered by meeting labels; no per-task labels |
 | 017 | done   | tray-and-icon               | moacyrricardo/spec-017-tray-and-icon-build | —     | icon without white corners; tray start/stop + show/hide |
 | 018 | done   | per-track-transcription     | moacyrricardo/spec-018-per-track-transcription | —     | mic and call transcribed separately; live cost 1.2x real time on MX230 + turn gluing → follow-ups (see Implementation Notes) |
-| 019 | doing  | slice-queue                 | moacyrricardo/spec-019-slice-queue-build | —     | replaces 018 §2: per-track slices at own pauses, one queue/worker |
+| 019 | done   | slice-queue                 | moacyrricardo/spec-019-slice-queue-build | —     | replaces 018 §2: per-track slices, one queue/worker; delay 31→17.5 s, backlog bounded, Whisper still 1.05x on MX230 → follow-ups |

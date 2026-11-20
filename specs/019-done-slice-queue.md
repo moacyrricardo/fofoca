@@ -1,4 +1,4 @@
-Status: doing
+Status: done
 Branch: moacyrricardo/spec-019-slice-queue-build
 
 # 019 — Slice queue: each track cut at its own pauses, one Whisper worker
@@ -202,3 +202,123 @@ has a test in `src/lib/*.test.ts`.
 - **No acoustic echo cancellation** (PipeWire `echo-cancel`). The rule is level and text based.
 - The thresholds (`min_s`, `hold_s`, `backlog_s`, the 0.25× echo ratio) are first guesses tuned on
   one call. Hand tests on more calls may move them.
+
+## Implementation Notes
+
+Built on `moacyrricardo/spec-019-slice-queue-build` (PR #25, stacked on the spec PR #24). The
+Decision is in place for live, the after-call rebuild and imports. **Decision 9's headline number
+is not met:** Whisper stays at 1.02–1.06× real time on the MX230 (measured below).
+
+### Where it landed
+
+- `slicer.rs` (§1): `Slice`, `SlicerConfig::{live, rebuild, for_config}`, `Slicer::{push, finish,
+  pending_from, pending_s}`. `audio::quiet_level` is `has_speech`'s threshold, now shared.
+- `queue.rs` (§2, §4): `SliceQueue::{push, next, done, call_audio, set_call_open, queued_s}`,
+  `Request`, `QueueStats`, `BACKLOG_S` / `MERGE_GAP_S` / `MERGE_MAX_S` / `ALWAYS_MERGE`, and
+  `queue::transcribe(req, lines, whisper)`, which takes Whisper as a closure.
+- `tracks.rs` (§3–§5): `insert_by_start`, `prompt_before`, `drop_echoes` (with `strip_echo` for a
+  turn glued to an echo). 018's `with_speech` / `transcribe_parts` are gone from the core.
+- `session.rs`: the capture loop feeds both slicers (call first) and the queue, and the worker
+  sends one request at a time. `Status.backlog_s` = audio not yet taken + queued + open + held.
+- `store.rs`: every transcript reader sorts by start (stable). Live lines are still appended.
+- `pipeline.rs` (§6): `transcribe_tracks` → `slice_and_transcribe` (Whisper as a closure) for the
+  rebuild and imports.
+- UI: `lib/transcript.ts` `insertByStart` (+ test), used by `App.svelte`; `fake.ts` sends the
+  00:32 call line after the 00:40 reply.
+- `fofoca-cli bench-latency <call.wav> --mic <mic.wav> --queue [--updates fast|balanced|light]
+  [--backlog S] [--merge-gap S] [--min-s S]`. 018's per-track mode stays in the CLI for
+  comparison.
+
+### Differences from the spec
+
+- **`backlog_s` = 10 s, not 20 s.** One informed adjustment, measured (table below): about the same
+  Whisper time, much lower delay.
+- **Pause detection** is the slicer's own scan of 50 ms windows against a rolling ~30 s floor
+  (`audio::quiet_level`). It doesn't call `audio::pause_cut`, whose floor is per buffer; the spec
+  asks for a rolling one. `audio::quiet_cut` is reused for the `max_s` cut on a single track.
+- **`prompt_before` is in `tracks.rs`**, not `session.rs`: the queue, the rebuild and the bench
+  share it.
+- **Custom (config.toml):** the chunk length is `max_s` as specified; `min_s` and `hold_s` are
+  Balanced's 4 s / 15 s, capped at half and three quarters of `max_s`.
+- **A pause in the recording** closes all open and held slices, so nothing is joined across it.
+- **Echo split** uses word times interpolated over the line (`approx_words`, as the transcript has
+  no measured word times). Only a run of ≥ 3 repeated words at the start or end is cut, with 1 s
+  of slack around the call line; otherwise the line stays whole.
+- **Summary scheduling (eval fix):** a due summary (automatic or "Summarize now") runs before the
+  next request. Before the fix it waited for an empty queue, which with Whisper near real time
+  can mean the end of the call.
+- **Auto-scroll** in the live view is unchanged (it always follows the bottom). The spec's
+  "unless the user scrolled up, as today" describes behaviour that doesn't exist today, and adding
+  it wasn't part of this spec.
+- **The stop drain stays:** after Stop, the live queue is worked through before the rebuild, which
+  then transcribes everything again (as 018 did).
+
+### Measured (§7, Decision 9)
+
+Real 10:38 call, read in place; MX230, large-v3-turbo + VAD; simulated real time, no summary
+swaps. Mixed and 018 were re-run on the same day and machine with the 018 code (018's own run
+had measured 73 requests / 1.20×; this machine ran faster today, so only these rows compare):
+
+| | requests | Whisper busy | median delay | p90 | max | done after audio | You / Call lines |
+|---|---|---|---|---|---|---|---|
+| mixed (before 018) | 56 | 547 s = **0.86×** | 10.8 s | 37.0 s | 62.6 s | 9.3 s | — (one track) |
+| 018 per track, shared cuts | 80 | 659 s = 1.03× | 31.1 s | 60.0 s | 84.0 s | 30.8 s | 31 / 42 (018 notes) |
+| **019 Balanced (shipped: backlog 10 s)** | 79 | 672 s = **1.05×** | **17.5 s** | 36.0 s | 44.0 s | 39.6 s | 33 / 52 |
+| 019 Balanced, spec defaults (backlog 20 s) | 78 | 678 s = 1.06× | 23.1 s | 45.0 s | 77.8 s | 44.9 s | 35 / 48 |
+| 019 Balanced, backlog 10, merge gap 6 s | 72 | 733 s = 1.15× | 20.6 s | 111.4 s | 132.0 s | 100.4 s | 29 / 46 |
+| 019 Balanced, backlog 10, `min_s` 6 | 76 | 661 s = 1.04× | 17.7 s | 35.7 s | 46.9 s | 30.4 s | 35 / 49 |
+| 019 Balanced, backlog 10, `min_s` 8 | 73 | 646 s = 1.01× | 18.2 s | 32.7 s | 38.4 s | 25.1 s | 28 / 63 |
+| 019 Fast (backlog 10) | 80 | 669 s = 1.05× | 16.0 s | 31.7 s | 41.9 s | 36.6 s | 37 / 55 |
+| 019 Light (backlog 10) | 79 | 654 s = 1.02× | 15.1 s | 32.2 s | 51.9 s | 30.3 s | 32 / 59 |
+
+Queue stats for the shipped Balanced run: 53 mic / 71 call slices, 31 merged requests, 5 requests
+returned no lines (all mic), 19 mic slices held as likely echo, 2 mic lines dropped or cut as echo.
+
+- **Whisper busy < 1.0×: not met** (1.02–1.06×, the same as 018 today).
+- **Bounded backlog: met.** Merging holds it at ~10–25 s through the call (per-minute samples
+  9–44 s, peak 56 s), with no upward trend.
+- **Median delay ≤ mixed (22 s in 018's run): met** at 17.5 s, but **not** against today's mixed
+  run (10.8 s).
+- **Labels (31 / 42 ± 10 %):** You 33 (+6 %) is in range; Call 52 (+24 %) is not. These are more
+  lines: separate call turns are no longer glued into one line. The labels themselves come from
+  the track, as in 018.
+- **Why not < 1.0×:** a request does not cost the same however short its audio. Fitting mixed
+  against 018, each request has about 4.7 s of fixed cost and the rest grows with the text, so
+  long merged requests (gap 6 s) cost more. 019 sends about as many requests as 018 (79 vs 80):
+  the call track's long turns are cut at every pause after `min_s`, and slices are merged only
+  when they are already queued. Tuning stopped after these adjustments, as asked.
+- Echo: unit-tested with a synthetic −20 dB copy. On the real call (which has no bleed) the hold
+  fired 19 times and dropped 2 lines, so on this call it mostly delays mic slices rather than
+  catching echoes.
+
+### Not verified yet
+
+- **Any real session in `cargo tauri dev`:** live slices and the backlog on a real call *with*
+  summary swaps (the benchmark has none); the summary now running while slices queue; out-of-order
+  lines in the real live view (only the browser preview with `fake.ts` was checked); pause/resume
+  closing slices; the rebuild and an import through the queue on real audio (the ignored real-model
+  test `per_track_rebuild_on_a_real_recording` was not re-run).
+- **Echo hold on a call without headphones** (only synthetic echo was tested).
+- **Speaker separation after the rebuild:** call lines are now shorter (one turn each). That
+  should help `speakers::assign`, but it wasn't measured.
+- Run-to-run variance of the benchmark: each configuration was run once.
+
+### Follow-ups (not created here: new specs go on `main`, and this build did not touch `main`)
+
+- **(a) Whisper time under 1.0×.** Options measured or left open: `--audio-ctx` sized to short
+  slices (Known Gaps), a longer Balanced `min_s` (8 s gave 1.01× but more Call lines), or mixed
+  requests while behind. Measure with `bench-latency --queue --min-s … --backlog …`.
+- **(b) Echo hold threshold.** It fires on mic slices that aren't textual echoes; tune it on a call
+  without headphones.
+- **(c) Stop drain vs rebuild.** When `transcript_after` is on, finishing the live queue after Stop
+  is mostly thrown away by the rebuild; skipping it would shorten Processing.
+
+### Change division
+
+There is no `CONTRIBUTING.md`; this follows the handoff's conventions. The todo→doing rename is its
+own commit, then there is one commit per concern: slicer, queue/worker, place by start (core + UI
+helper + `fake.ts`), echo hold-back, `prompt_before`, rebuild/imports via the queue, bench
+`--queue`, then the measured `backlog_s` change and the two eval fixes (summary scheduling, the
+rebuild `max_s` constant). Every commit passed all checks. There's no pre-PR: the only enabling
+refactor (`audio::quiet_level`, 10 lines) rides with the slicer that needs it. The project has no
+version-bump policy; none was made.
