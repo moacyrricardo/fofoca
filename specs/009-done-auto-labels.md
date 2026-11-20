@@ -1,3 +1,6 @@
+Status: done
+Branch: moacyrricardo/spec-009-auto-labels
+
 # 009 — Automatic labels from calendars and recurring meetings
 
 ## Context
@@ -53,3 +56,15 @@ anything.
 - Rules by attendee e-mail domain (`@client.com` → `client`) — later; needs a small rules editor.
 - No back-fill: meetings recorded before 009 have no `calendar_uid`, so series inheritance starts
   with the next recording.
+
+## Implementation Notes
+
+- Built as specified. `StartInfo` is used by `Store::create` as well as `Session::start`.
+- Series labels are merged in two places with the same rule: `start_session` (what gets saved) and
+  `upcoming_events` (what Up next shows). The merge for Up next runs **after** the 5-minute event
+  cache, so labels edited on a past meeting show up on the next refresh.
+- The calendar-name label is applied only to calendars added from now on; existing calendars keep
+  whatever default labels they had.
+- Verified: core tests (calendar pre-fill, newest-meeting series lookup), clippy, svelte-check,
+  and the browser preview (Up next shows `#trabalho` from the calendar and `#1:1` inherited from
+  the series).
