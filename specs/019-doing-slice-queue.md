@@ -1,5 +1,5 @@
-Status: todo
-Branch: —
+Status: doing
+Branch: moacyrricardo/spec-019-slice-queue-build
 
 # 019 — Slice queue: each track cut at its own pauses, one Whisper worker
 
