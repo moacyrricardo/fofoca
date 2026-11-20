@@ -99,6 +99,12 @@ fn set_meeting_labels(state: State<AppState>, id: String, labels: Vec<String>) -
     Ok(meta)
 }
 
+/// Every meeting's action items (spec 016); the UI filters by the meetings' labels.
+#[tauri::command]
+fn list_tasks(state: State<AppState>) -> CmdResult<Vec<fofoca_core::store::TaskItem>> {
+    state.store.tasks().map_err(err)
+}
+
 #[tauri::command]
 fn get_meeting(state: State<AppState>, id: String) -> CmdResult<Meeting> {
     state.store.load(&id).map_err(err)
@@ -474,6 +480,7 @@ pub fn run() {
             known_labels,
             set_meeting_labels,
             get_meeting,
+            list_tasks,
             rename_speaker,
             separate_speakers,
             write_notes,

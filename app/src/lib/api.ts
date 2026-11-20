@@ -1,7 +1,7 @@
 // Backend bridge. Inside Tauri it calls the Rust commands; in a plain browser (`npm run dev`
 // without Tauri) it falls back to a scripted fake so the UI can be developed and screenshotted.
 
-import type { AudioConfig, DownloadEvent, ModelSetting, ModelsView, Workflow, WorkflowView, JobEvent, StorageView, CalendarSettings, CalendarSource, ConfigView, LabelCount, Meeting, MeetingMeta, SessionEvent, Upcoming } from "./types";
+import type { AudioConfig, DownloadEvent, TaskItem, ModelSetting, ModelsView, Workflow, WorkflowView, JobEvent, StorageView, CalendarSettings, CalendarSource, ConfigView, LabelCount, Meeting, MeetingMeta, SessionEvent, Upcoming } from "./types";
 import * as fake from "./fake";
 import type { TrackUrls } from "./player.svelte";
 
@@ -20,6 +20,7 @@ export const api = {
   config: () => call<ConfigView>("get_config"),
   meetings: () => call<MeetingMeta[]>("list_meetings"),
   meeting: (id: string) => call<Meeting>("get_meeting", { id }),
+  tasks: () => call<TaskItem[]>("list_tasks"),
   renameSpeaker: (id: string, speaker: string, name: string) => call<Meeting>("rename_speaker", { id, speaker, name }),
   separateSpeakers: (id: string) => call<Meeting>("separate_speakers", { id }),
   writeNotes: (id: string) => call<Meeting>("write_notes", { id }),

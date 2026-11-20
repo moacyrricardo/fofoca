@@ -40,11 +40,18 @@ const meetings: Meeting[] = [
       { text: "A nova feature foi publicada na sexta, 15 de novembro, com feedback positivo.", refs: [48, 56] },
     ],
     decisions: [],
-    action_items: [{ text: "Enviar o follow-up por e-mail", owner: "Você", due: "2026-11-19", refs: [64] }],
+    action_items: [
+      { text: "Enviar o follow-up por e-mail", owner: "Você", due: "2026-11-19", refs: [64] },
+      { text: "Retomar o contato com o cliente de Belo Horizonte", owner: "Rodrigo Lima", due: "2026-11-27", refs: [16, 24] },
+    ],
     flagged: [{ section: "summary", text: "A diferença no orçamento foi de R$ 26.250.", reason: "26250 isn't said in the cited lines", refs: [40] }],
     model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2,
   }, segments: separated, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
-  { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true, labels: ["trabalho", "1:1"], calendar_uid: "1" }, segments: segs.slice(0, 3), summaries: [] },
+  { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true, labels: ["trabalho", "1:1"], calendar_uid: "1" }, segments: segs.slice(0, 3), summaries: [],
+    notes: { summary: [], decisions: [], flagged: [], model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2, action_items: [
+      { text: "Revisar os indicadores do trimestre antes da diretoria", owner: "Fernanda", due: "2026-11-21", refs: [8] },
+      { text: "Marcar a conversa sobre o orçamento", owner: null, due: null, refs: [0] },
+    ] } },
 ];
 
 const config: ConfigView = {
@@ -86,6 +93,7 @@ export function onSession(cb: (e: SessionEvent) => void): () => void {
 
 export async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   switch (cmd) {
+    case "list_tasks": return meetings.flatMap((m) => (m.notes?.action_items ?? []).map((t) => ({ meeting_id: m.meta.id, meeting_title: m.meta.title, started_at: m.meta.started_at, labels: m.meta.labels ?? [], ...t }))) as T;
     case "get_config": return structuredClone(config) as T;
     case "workflow_view": case "probe_hardware": return workflowView() as T;
     case "set_workflow": config.config.workflow = args?.workflow as Workflow; return workflowView() as T;

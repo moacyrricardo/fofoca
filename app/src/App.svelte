@@ -9,10 +9,11 @@
   import Processing from "./screens/Processing.svelte";
   import MeetingView from "./screens/MeetingView.svelte";
   import Settings from "./screens/Settings.svelte";
+  import Tasks from "./screens/Tasks.svelte";
   import { setupTitle } from "./lib/workflow";
   import launchIcon from "./assets/launch.png";
 
-  type Screen = "meetings" | "live" | "processing" | "meeting" | "settings";
+  type Screen = "meetings" | "tasks" | "live" | "processing" | "meeting" | "settings";
   let screen = $state<Screen>("meetings");
   let openId = $state<string | null>(null);
   let meetings = $state<MeetingMeta[]>([]);
@@ -59,7 +60,12 @@
     }
   }
 
-  function open(id: string) {
+  /** Meeting page tab to open on, and the screen "back" returns to (spec 016: from Tasks). */
+  let openTab = $state<"tasks" | undefined>(undefined);
+  let backTo = $state<Screen>("meetings");
+  function open(id: string, tab?: "tasks") {
+    backTo = screen === "tasks" ? "tasks" : "meetings";
+    openTab = tab;
     openId = id;
     screen = "meeting";
   }
@@ -184,6 +190,7 @@
           if (h === "processing") setTimeout(() => api.stop(true).then(() => (screen = "processing")), 3000);
         } else if (["meeting", "speakers", "transcript", "tasks"].includes(h)) open("2026-11-19-140200");
         else if (h === "settings") screen = "settings";
+        else if (h === "alltasks") screen = "tasks";
         else if (h === "import") importRecording();
       }, 50);
     }
@@ -196,6 +203,7 @@
 
   const nav: { id: Screen; label: string; path: string }[] = [
     { id: "meetings", label: "Meetings", path: "M4 6h16M4 12h16M4 18h10" },
+    { id: "tasks", label: "Tasks", path: "M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" },
     { id: "live", label: "Record", path: "M9 3h6v11a3 3 0 0 1-6 0zM5 11a7 7 0 0 0 14 0M12 18v3" },
     { id: "settings", label: "Settings", path: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12l2-1-1-3-2 .2-1.3-1.3.2-2-3-1-1 2h-1.8l-1-2-3 1 .2 2L6.9 6.2 5 6l-1 3 2 1v2l-2 1 1 3 2-.2 1.3 1.3-.2 2 3 1 1-2h1.8l1 2 3-1-.2-2 1.3-1.3 2 .2 1-3z" },
   ];
@@ -215,7 +223,7 @@
       <div><b>fo-foca</b><small>local ai transcribe &amp; task</small></div>
     </div>
     {#each nav as n}
-      <button class="nav" class:on={screen === n.id || (n.id === "live" && screen === "processing") || (n.id === "meetings" && screen === "meeting")} onclick={() => go(n.id)}>
+      <button class="nav" class:on={screen === n.id || (n.id === "live" && screen === "processing") || (n.id === backTo && screen === "meeting")} onclick={() => go(n.id)}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d={n.path} /></svg>
         {n.label}
         {#if n.id === "live" && recording}<span class="dot live" style="margin-left:auto"></span>{/if}
@@ -249,7 +257,9 @@
     {:else if screen === "processing"}
       <Processing onopen={(id) => open(id)} />
     {:else if screen === "meeting" && openId}
-      <MeetingView id={openId} job={jobs[openId]} onback={() => go("meetings")} {notify} />
+      <MeetingView id={openId} job={jobs[openId]} initialTab={openTab} backLabel={backTo === "tasks" ? "Tasks" : "Meetings"} onback={() => go(backTo)} {notify} />
+    {:else if screen === "tasks"}
+      <Tasks onopen={(id) => open(id, "tasks")} {notify} />
     {:else if screen === "settings"}
       <Settings {config} {notify} onchange={() => api.config().then((c) => (config = c)).catch(() => {})} />
     {/if}

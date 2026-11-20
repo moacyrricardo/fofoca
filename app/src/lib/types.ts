@@ -47,6 +47,9 @@ export interface JobEvent { meeting_id: string; step: "queued" | "converting" | 
 export interface AudioConfig { keep: "always" | "after_processing" | "days"; keep_days: number }
 export interface StorageView { audio: AudioConfig; audio_bytes: number; meetings_with_audio: number }
 
+/** One action item with its meeting (spec 016); filtered by the meeting's labels. */
+export interface TaskItem { meeting_id: string; meeting_title: string; started_at: string; labels: string[]; text: string; owner: string | null; due: string | null; refs: number[] }
+
 /** Settings → Processing (spec 015). */
 export type Device = "gpu" | "cpu";
 export type Layout = "swap" | "gpu_transcript" | "gpu_summary" | "cpu" | "gpu_both";

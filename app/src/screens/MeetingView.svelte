@@ -12,7 +12,11 @@
   import { load as loadAudio, play, player, seek, skip, toggle, unload as unloadAudio } from "../lib/player.svelte";
   import { lineAt, wordAt, wordTimes } from "../lib/replay";
 
-  let { id, job, onback, notify }: { id: string; job?: JobEvent; onback: () => void; notify: (t: string, e?: boolean) => void } = $props();
+  let { id, job, onback, notify, initialTab, backLabel = "Meetings" }: {
+    id: string; job?: JobEvent; onback: () => void; notify: (t: string, e?: boolean) => void;
+    /** Open on this tab (spec 016: a task opens its meeting on Tasks). */
+    initialTab?: "tasks"; backLabel?: string;
+  } = $props();
   const importing = $derived(!!job && !["done", "failed"].includes(job.step));
 
   let meeting = $state<Meeting | null>(null);
@@ -130,7 +134,7 @@
           loadAudio(want, urls, Math.max(m.meta.duration_s, m.segments.at(-1)?.end ?? 0));
           audio = urls.mic || urls.call ? "ok" : "none";
         }).catch((e) => { audio = "none"; notify(String(e), true); });
-        tab = m.notes || m.summaries.some((s) => s.kind === "final") ? "summary" : "transcript";
+        tab = initialTab ?? (m.notes || m.summaries.some((s) => s.kind === "final") ? "summary" : "transcript");
         if (preview && ["#speakers", "#transcript", "#tasks"].includes(location.hash)) tab = location.hash.slice(1) as typeof tab; // browser preview only
       }
     }).catch((e) => notify(String(e), true));
@@ -192,7 +196,7 @@
 <svelte:window onkeydown={onkey} onwheel={scrolledByUser} ontouchmove={scrolledByUser} />
 
 <section class="screen">
-  <button class="back" onclick={onback}>← Meetings</button>
+  <button class="back" onclick={onback}>← {backLabel}</button>
   {#if !meeting}
     <p class="faint">Loading…</p>
   {:else}
