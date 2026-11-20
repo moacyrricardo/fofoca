@@ -466,6 +466,7 @@ pub fn run() {
             // Replay (spec 014): meeting audio over loopback HTTP, token-guarded, meeting audio only.
             let media = fofoca_core::media::MediaServer::start(store.clone())?;
             app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), calendars, upcoming: Mutex::new(None), jobs, media, settings: Default::default() });
+            settings::probe_in_background(app.handle().clone()); // spec 015: off the UI thread
             // Embedded so the window has the seal icon even when no .desktop entry is installed
             // (X11/XWayland). GNOME on Wayland takes the icon from the desktop entry instead —
             // bundles ship one; for development see scripts/install-dev-desktop-entry.sh.

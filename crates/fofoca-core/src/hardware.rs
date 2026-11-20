@@ -3,7 +3,8 @@
 
 use serde::Serialize;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::config::{Config, Layout};
 
@@ -18,11 +19,28 @@ pub struct Gpu {
 
 /// The configured `[llm].device` as `llama-server --list-devices` reports it, or `None` when it
 /// isn't there (no usable GPU, or the server can't run).
+/// Gives up after `PROBE_TIMEOUT` (a cold start from a slow disk can take a while; a stuck driver
+/// must not hang the app).
 pub fn probe(cfg: &Config) -> Option<Gpu> {
-    let out = Command::new(&cfg.llm.server).arg("--list-devices").output().ok()?;
+    let mut cmd = Command::new(&cfg.llm.server);
+    cmd.arg("--list-devices").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::proc::die_with_parent(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    while child.try_wait().ok()?.is_none() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let out = child.wait_with_output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     parse_devices(&text).into_iter().find(|g| g.device == cfg.llm.device)
 }
+
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Parse lines like `  Vulkan1: NVIDIA GeForce MX230 (2294 MiB, 2234 MiB free)`.
 pub fn parse_devices(text: &str) -> Vec<Gpu> {

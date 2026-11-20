@@ -62,9 +62,18 @@ fn workflow_view_of(state: &AppState, force_probe: bool) -> WorkflowView {
     }
 }
 
+/// Async + a blocking thread: the first GPU probe can take a while, and a sync command would run
+/// on the main thread and freeze the window.
 #[tauri::command]
-pub fn workflow_view(state: State<AppState>) -> WorkflowView {
-    workflow_view_of(&state, false)
+pub async fn workflow_view(app: AppHandle) -> CmdResult<WorkflowView> {
+    tauri::async_runtime::spawn_blocking(move || workflow_view_of(&app.state::<AppState>(), false)).await.map_err(err)
+}
+
+/// Probe the GPU once in the background at startup, so Settings opens with it ready.
+pub fn probe_in_background(app: AppHandle) {
+    std::thread::spawn(move || {
+        let _ = gpu(&app.state::<AppState>(), false);
+    });
 }
 
 /// "Check this computer again": probe the GPU anew.
@@ -74,10 +83,15 @@ pub async fn probe_hardware(app: AppHandle) -> CmdResult<WorkflowView> {
 }
 
 #[tauri::command]
-pub fn set_workflow(state: State<AppState>, workflow: Workflow) -> CmdResult<WorkflowView> {
-    Config::save_workflow(&config_path(), &workflow).map_err(err)?;
-    state.cfg.write().unwrap().workflow = workflow;
-    Ok(workflow_view_of(&state, false))
+pub async fn set_workflow(app: AppHandle, workflow: Workflow) -> CmdResult<WorkflowView> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        Config::save_workflow(&config_path(), &workflow).map_err(err)?;
+        state.cfg.write().unwrap().workflow = workflow;
+        Ok(workflow_view_of(&state, false))
+    })
+    .await
+    .map_err(err)?
 }
 
 #[derive(Serialize)]
