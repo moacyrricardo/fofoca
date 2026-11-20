@@ -28,6 +28,16 @@ class IconTests(unittest.TestCase):
                     for y in (0, icon.height - 1):
                         self.assertEqual(icon.getpixel((x, y))[3], 0)
 
+    def test_bundle_corners_at_every_resolution(self):
+        with Image.open(TAURI / "icons/icon.ico") as ico, Image.open(TAURI / "icons/icon.icns") as icns:
+            for bundle, sizes in [(ico.ico, ico.ico.sizes()), (icns.icns, icns.info["sizes"])]:
+                for size in sizes:
+                    with self.subTest(bundle=type(bundle).__name__, size=size):
+                        image = bundle.getimage(size).convert("RGBA")
+                        for x in (0, image.width - 1):
+                            for y in (0, image.height - 1):
+                                self.assertEqual(image.getpixel((x, y))[3], 0)
+
     def test_tray_images_match_source_and_recording_badge(self):
         with Image.open(TAURI / "app-icon.png") as tile:
             for name, expected in zip(("idle", "recording"), generator["tray_images"](tile)):
