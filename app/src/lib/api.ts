@@ -28,9 +28,8 @@ export const api = {
   /** Playable URLs of the meeting's audio files that still exist (spec 014). */
   audioTracks: async (id: string): Promise<TrackUrls> => {
     if (!inTauri) return fake.audioTracks(id);
-    const { convertFileSrc } = await import("@tauri-apps/api/core");
-    const t = await call<{ mic: string | null; call: string | null }>("audio_tracks", { id });
-    return { mic: t.mic && convertFileSrc(t.mic), call: t.call && convertFileSrc(t.call) };
+    // Loopback http:// URLs — WebKitGTK's GStreamer can't stream from asset:// (spec 014 fix).
+    return call<TrackUrls>("audio_tracks", { id });
   },
   storage: () => call<StorageView>("storage"),
   pickRecording: () => call<string | null>("pick_recording"),
