@@ -1,5 +1,7 @@
 //! Tauri shell: exposes fofoca-core to the UI as commands and forwards session events.
 
+mod settings;
+
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -24,6 +26,8 @@ struct AppState {
     jobs: fofoca_core::jobs::Jobs,
     /// Upcoming events, refreshed at most every CALENDAR_TTL unless forced.
     upcoming: Mutex<Option<(Instant, Upcoming)>>,
+    /// GPU probe and model downloads (spec 015).
+    settings: settings::SettingsState,
 }
 
 impl AppState {
@@ -133,7 +137,7 @@ async fn write_notes(app: AppHandle, id: String) -> CmdResult<Meeting> {
             return Err("a recording is running — the GPU is busy with it".to_string());
         }
         let m = state.store.load(&id).map_err(err)?;
-        let server = fofoca_core::servers::ModelServer::start(fofoca_core::servers::Kind::Llm, &state.cfg()).map_err(err)?;
+        let server = fofoca_core::servers::ModelServer::start(fofoca_core::servers::Kind::Llm, &state.cfg(), state.cfg().workflow.notes_device).map_err(err)?;
         let client = fofoca_core::llm::LlmClient::new(&server.base_url).map_err(err)?;
         let notes = fofoca_core::notes::extract(&client, &m.segments, &m.speakers, &m.meta, &state.cfg()).map_err(err)?;
         drop(server);
@@ -455,7 +459,7 @@ pub fn run() {
             );
             // Replay (spec 014): meeting audio over loopback HTTP, token-guarded, meeting audio only.
             let media = fofoca_core::media::MediaServer::start(store.clone())?;
-            app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), calendars, upcoming: Mutex::new(None), jobs, media });
+            app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), calendars, upcoming: Mutex::new(None), jobs, media, settings: Default::default() });
             // Embedded so the window has the seal icon even when no .desktop entry is installed
             // (X11/XWayland). GNOME on Wayland takes the icon from the desktop entry instead —
             // bundles ship one; for development see scripts/install-dev-desktop-entry.sh.
@@ -476,6 +480,15 @@ pub fn run() {
             set_keep_audio,
             delete_audio,
             audio_tracks,
+            settings::workflow_view,
+            settings::probe_hardware,
+            settings::set_workflow,
+            settings::models_view,
+            settings::set_model_path,
+            settings::use_model,
+            settings::pick_model_file,
+            settings::download_model,
+            settings::cancel_download,
             storage,
             set_audio_policy,
             pick_recording,

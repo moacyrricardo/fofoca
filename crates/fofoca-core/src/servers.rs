@@ -9,7 +9,7 @@ use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::config::{data_dir, Config};
+use crate::config::{data_dir, Config, Device};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -26,7 +26,8 @@ pub struct ModelServer {
 impl ModelServer {
     /// Start a server and wait until it answers. Fails fast if the process dies while loading
     /// (typically: out of GPU memory).
-    pub fn start(kind: Kind, cfg: &Config) -> Result<ModelServer> {
+    /// `device` picks GPU (the configured one) or CPU (spec 015).
+    pub fn start(kind: Kind, cfg: &Config, device: Device) -> Result<ModelServer> {
         let port = free_port()?;
         let log_dir = data_dir().join("logs");
         std::fs::create_dir_all(&log_dir)?;
@@ -41,7 +42,11 @@ impl ModelServer {
                 let w = &cfg.whisper;
                 let mut c = Command::new(&w.server);
                 c.arg("-m").arg(&w.model);
-                c.args(["-dev", &w.device.to_string(), "-t", &w.threads.to_string()]);
+                match device {
+                    Device::Gpu => c.args(["-dev", &w.device.to_string()]),
+                    Device::Cpu => c.arg("-ng"),
+                };
+                c.args(["-t", &w.threads.to_string()]);
                 if let Some(vad) = w.vad_model.as_ref().filter(|p| p.exists()) {
                     c.arg("--vad").arg("-vm").arg(vad);
                 }
@@ -51,7 +56,11 @@ impl ModelServer {
                 let l = &cfg.llm;
                 let mut c = Command::new(&l.server);
                 c.arg("-m").arg(&l.model);
-                c.args(["-dev", &l.device, "-ngl", "99", "-t", &l.threads.to_string()]);
+                match device {
+                    Device::Gpu => c.args(["-dev", &l.device, "-ngl", "99"]),
+                    Device::Cpu => c.args(["-dev", "none", "-ngl", "0"]),
+                };
+                c.args(["-t", &l.threads.to_string()]);
                 c.args(["-c", &l.context.to_string(), "-ctk", "q8_0", "-ctv", "q8_0", "-fa", "on"]);
                 c.args(["--jinja", "--reasoning", "off"]);
                 c

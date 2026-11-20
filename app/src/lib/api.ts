@@ -1,7 +1,7 @@
 // Backend bridge. Inside Tauri it calls the Rust commands; in a plain browser (`npm run dev`
 // without Tauri) it falls back to a scripted fake so the UI can be developed and screenshotted.
 
-import type { AudioConfig, JobEvent, StorageView, CalendarSettings, CalendarSource, ConfigView, LabelCount, Meeting, MeetingMeta, SessionEvent, Upcoming } from "./types";
+import type { AudioConfig, DownloadEvent, ModelSetting, ModelsView, Workflow, WorkflowView, JobEvent, StorageView, CalendarSettings, CalendarSource, ConfigView, LabelCount, Meeting, MeetingMeta, SessionEvent, Upcoming } from "./types";
 import * as fake from "./fake";
 import type { TrackUrls } from "./player.svelte";
 
@@ -32,6 +32,15 @@ export const api = {
     return call<TrackUrls>("audio_tracks", { id });
   },
   storage: () => call<StorageView>("storage"),
+  workflowView: () => call<WorkflowView>("workflow_view"),
+  probeHardware: () => call<WorkflowView>("probe_hardware"),
+  setWorkflow: (workflow: Workflow) => call<WorkflowView>("set_workflow", { workflow }),
+  modelsView: () => call<ModelsView>("models_view"),
+  setModelPath: (setting: ModelSetting, path: string) => call<ModelsView>("set_model_path", { setting, path }),
+  useModel: (id: string) => call<ModelsView>("use_model", { id }),
+  pickModelFile: (setting: ModelSetting) => call<string | null>("pick_model_file", { setting }),
+  downloadModel: (id: string) => call<void>("download_model", { id }),
+  cancelDownload: (id: string) => call<void>("cancel_download", { id }),
   pickRecording: () => call<string | null>("pick_recording"),
   importRecording: (path: string, title: string | null = null, labels: string[] = []) => call<MeetingMeta>("import_recording", { path, title, labels }),
   setAudioPolicy: (audio: AudioConfig) => call<StorageView>("set_audio_policy", { audio }),
@@ -59,6 +68,13 @@ export async function onSession(cb: (e: SessionEvent) => void): Promise<() => vo
   if (!inTauri) return fake.onSession(cb);
   const { listen } = await import("@tauri-apps/api/event");
   return listen<SessionEvent>("session", (e) => cb(e.payload));
+}
+
+/** Model download progress (spec 015). */
+export async function onDownload(cb: (e: DownloadEvent) => void): Promise<() => void> {
+  if (!inTauri) return fake.onDownload(cb);
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<DownloadEvent>("download", (e) => cb(e.payload));
 }
 
 /** Background job progress (imports, spec 012). */

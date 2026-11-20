@@ -9,6 +9,7 @@
   import Processing from "./screens/Processing.svelte";
   import MeetingView from "./screens/MeetingView.svelte";
   import Settings from "./screens/Settings.svelte";
+  import { setupTitle } from "./lib/workflow";
   import launchIcon from "./assets/launch.png";
 
   type Screen = "meetings" | "live" | "processing" | "meeting" | "settings";
@@ -228,7 +229,7 @@
         <div><span class="dot ok"></span><b>Ready</b></div>
       {/if}
       <div class="faint">{shortModel(config?.whisper_model)} · {shortModel(config?.llm_model)}</div>
-      <div class="faint">swap layout</div>
+      <div class="faint">{config?.config.workflow ? setupTitle(config.config.workflow).toLowerCase() : ""}</div>
     </button>
   </aside>
 
@@ -250,7 +251,7 @@
     {:else if screen === "meeting" && openId}
       <MeetingView id={openId} job={jobs[openId]} onback={() => go("meetings")} {notify} />
     {:else if screen === "settings"}
-      <Settings {config} {notify} />
+      <Settings {config} {notify} onchange={() => api.config().then((c) => (config = c)).catch(() => {})} />
     {/if}
   </main>
 </div>

@@ -95,7 +95,7 @@ fn run() -> Result<()> {
 fn transcribe(cfg: &Config, path: &str) -> Result<()> {
     let samples = audio::read_wav(path.as_ref())?;
     let t0 = Instant::now();
-    let server = ModelServer::start(Kind::Whisper, cfg)?;
+    let server = ModelServer::start(Kind::Whisper, cfg, cfg.live_devices().0)?;
     eprintln!("whisper loaded in {:.1}s", t0.elapsed().as_secs_f64());
     let client = WhisperClient::new(&server.base_url)?;
     let chunk = (cfg.chunk_seconds * SAMPLE_RATE) as usize;
@@ -163,7 +163,7 @@ fn bench_latency(cfg: &Config, args: &[String]) -> Result<()> {
     let samples = audio::read_wav(path.as_ref())?;
     let sr = SAMPLE_RATE as usize;
     let (chunk, min) = ((cfg.chunk_seconds * SAMPLE_RATE) as usize, (min_s * SAMPLE_RATE) as usize);
-    let server = ModelServer::start(Kind::Whisper, cfg)?;
+    let server = ModelServer::start(Kind::Whisper, cfg, cfg.live_devices().0)?;
     let client = WhisperClient::new(&server.base_url)?;
     let (mut t, mut pos, mut prompt) = (0.0f64, 0usize, String::new());
     let (mut latencies, mut text, mut requests, mut busy) = (Vec::new(), Vec::new(), 0, 0.0);
@@ -293,7 +293,7 @@ fn write_notes(cfg: &Config, store: &Store, id: &str) -> Result<()> {
     if m.segments.is_empty() {
         bail!("meeting {id} has no transcript");
     }
-    let server = ModelServer::start(Kind::Llm, cfg)?;
+    let server = ModelServer::start(Kind::Llm, cfg, cfg.workflow.notes_device)?;
     let n = fofoca_core::notes::extract(&LlmClient::new(&server.base_url)?, &m.segments, &m.speakers, &m.meta, cfg)?;
     println!("{}", fofoca_core::notes::to_markdown(&n, &cfg.language));
     for f in &n.flagged {
@@ -335,7 +335,7 @@ fn eval_notes(cfg: &Config, args: &[String]) -> Result<()> {
     let transcript = prompts::transcript_text(&segments, &speakers, &cfg.language);
     let said = numbers_in(&transcript);
 
-    let server = ModelServer::start(Kind::Llm, cfg)?;
+    let server = ModelServer::start(Kind::Llm, cfg, cfg.workflow.notes_device)?;
     let client = LlmClient::new(&server.base_url)?;
     let t0 = Instant::now();
     let free = client.complete(&prompts::final_summary(&transcript, &cfg.language), 700)?.text;
@@ -416,7 +416,7 @@ fn summarize(cfg: &Config, store: &Store, id: &str) -> Result<()> {
         bail!("meeting {id} has no transcript");
     }
     let t0 = Instant::now();
-    let server = ModelServer::start(Kind::Llm, cfg)?;
+    let server = ModelServer::start(Kind::Llm, cfg, cfg.workflow.notes_device)?;
     eprintln!("llm loaded in {:.1}s", t0.elapsed().as_secs_f64());
     let text = prompts::transcript_text(&meeting.segments, &meeting.speakers, &cfg.language);
     let c = LlmClient::new(&server.base_url)?.complete(&prompts::final_summary(&text, &cfg.language), 700)?;
