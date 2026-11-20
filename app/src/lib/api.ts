@@ -1,7 +1,7 @@
 // Backend bridge. Inside Tauri it calls the Rust commands; in a plain browser (`npm run dev`
 // without Tauri) it falls back to a scripted fake so the UI can be developed and screenshotted.
 
-import type { AudioConfig, StorageView, CalendarSettings, CalendarSource, ConfigView, LabelCount, Meeting, MeetingMeta, SessionEvent, Upcoming } from "./types";
+import type { AudioConfig, JobEvent, StorageView, CalendarSettings, CalendarSource, ConfigView, LabelCount, Meeting, MeetingMeta, SessionEvent, Upcoming } from "./types";
 import * as fake from "./fake";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -25,6 +25,8 @@ export const api = {
   setKeepAudio: (id: string, keep: boolean) => call<Meeting>("set_keep_audio", { id, keep }),
   deleteAudio: (id: string) => call<Meeting>("delete_audio", { id }),
   storage: () => call<StorageView>("storage"),
+  pickRecording: () => call<string | null>("pick_recording"),
+  importRecording: (path: string, title: string | null = null, labels: string[] = []) => call<MeetingMeta>("import_recording", { path, title, labels }),
   setAudioPolicy: (audio: AudioConfig) => call<StorageView>("set_audio_policy", { audio }),
   activeSession: () => call<MeetingMeta | null>("active_session"),
   start: (title: string, attendees: string[] = [], labels: string[] = [], calendarUid: string | null = null) =>
@@ -51,3 +53,14 @@ export async function onSession(cb: (e: SessionEvent) => void): Promise<() => vo
   const { listen } = await import("@tauri-apps/api/event");
   return listen<SessionEvent>("session", (e) => cb(e.payload));
 }
+
+/** Background job progress (imports, spec 012). */
+export async function onJob(cb: (e: JobEvent) => void): Promise<() => void> {
+  if (!inTauri) return fake.onJob(cb);
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<JobEvent>("job", (e) => cb(e.payload));
+}
+
+export const JOB_STEPS: Record<string, string> = {
+  queued: "Waiting", converting: "Converting", transcribing: "Transcribing", speakers: "Separating speakers", notes: "Writing notes",
+};

@@ -15,6 +15,8 @@
 //! fofoca-cli diarize-wav <file.wav> [--threshold T] [--max N]   print speaker turns of a WAV
 //! fofoca-cli list [--label L]               list stored meetings (optionally only those labelled L)
 //! fofoca-cli labels                         known labels with meeting counts
+//! fofoca-cli import <file> [--title T] [--label L]… [--at RFC3339]
+//!                                           import a recording made elsewhere (spec 012)
 //! fofoca-cli retention [--dry-run]          delete meeting audio per the [audio] policy
 //! fofoca-cli label <meeting-id> add|rm <label>
 //! fofoca-cli calendar <list|add LINK|PATH|remove ID|upcoming [DAYS]|labels ID [LABEL…]>
@@ -73,6 +75,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Some("label") => label(&store, &args[1..]),
+        Some("import") => import(&cfg, &store, &args[1..]),
         Some("retention") => {
             let dry = args.iter().any(|a| a == "--dry-run");
             let done = fofoca_core::retention::apply(&store, &cfg.audio, chrono::Local::now().fixed_offset(), None, dry)?;
@@ -326,6 +329,7 @@ fn eval_notes(cfg: &Config, args: &[String]) -> Result<()> {
         processed: false,
         keep_audio: None,
         audio_deleted_at: None,
+        imported_from: None,
     };
     let speakers = Default::default();
     let transcript = prompts::transcript_text(&segments, &speakers, &cfg.language);
@@ -375,28 +379,35 @@ fn eval_notes(cfg: &Config, args: &[String]) -> Result<()> {
 
 /// Transcribe a whole 16 kHz mono WAV like a live session would (quiet-point chunks, VAD).
 fn transcribe_segments(cfg: &Config, samples: &[i16]) -> Result<Vec<fofoca_core::Segment>> {
-    let server = ModelServer::start(Kind::Whisper, cfg)?;
-    let client = WhisperClient::new(&server.base_url)?;
-    let chunk = (cfg.chunk_seconds * SAMPLE_RATE) as usize;
-    let (mut pos, mut prompt, mut out) = (0, String::new(), Vec::new());
-    while pos < samples.len() {
-        let rest = &samples[pos..];
-        let n = audio::quiet_cut(&rest[..rest.len().min(chunk + 1)], &[], chunk, 3 * SAMPLE_RATE as usize);
-        let offset = pos as f64 / SAMPLE_RATE as f64;
-        for s in client.transcribe(audio::wav_bytes(&rest[..n]), &cfg.language, &prompt)? {
-            prompt = s.text.clone();
-            out.push(fofoca_core::Segment {
-                start: offset + s.start,
-                end: offset + s.end,
-                words: s.words.into_iter().map(|w| fofoca_core::Word { start: offset + w.start, end: offset + w.end, ..w }).collect(),
-                text: s.text,
-                track: fofoca_core::Track::Call,
-                speaker: None,
-            });
-        }
-        pos += n;
+    let hooks = fofoca_core::pipeline::Hooks { progress: &|_, _| {}, yield_gpu: &|| false };
+    fofoca_core::pipeline::transcribe_samples(cfg, samples, &hooks)
+}
+
+/// Import a recording made elsewhere as a meeting (spec 012) and print its notes.
+fn import(cfg: &Config, store: &Store, args: &[String]) -> Result<()> {
+    const USAGE: &str = "usage: import <file> [--title T] [--label L]… [--at RFC3339]";
+    let path = std::path::PathBuf::from(args.first().filter(|a| !a.starts_with("--")).context(USAGE)?);
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let info = fofoca_core::import::probe(&path)?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let meta = store.create(&StartInfo {
+        title: flag("--title").unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()),
+        labels: args.windows(2).filter(|w| w[0] == "--label").map(|w| w[1].clone()).collect(),
+        started_at: flag("--at").or(info.created_at),
+        imported_from: Some(name),
+        ..Default::default()
+    })?;
+    eprintln!("meeting {} ({:.0}s of audio)", meta.id, info.duration_s);
+    let progress = |step: &str, p: f64| eprint!("\r{step:<13} {:3.0}%   ", p * 100.0);
+    let hooks = fofoca_core::pipeline::Hooks { progress: &progress, yield_gpu: &|| false };
+    fofoca_core::pipeline::run_import(store, cfg, &meta.id, &path, &hooks)?;
+    eprintln!();
+    let m = store.load(&meta.id)?;
+    match &m.notes {
+        Some(n) => println!("{}", fofoca_core::notes::to_markdown(n, &cfg.language)),
+        None => println!("{}", prompts::transcript_text(&m.segments, &m.speakers, &cfg.language)),
     }
-    Ok(out)
+    Ok(())
 }
 
 fn summarize(cfg: &Config, store: &Store, id: &str) -> Result<()> {

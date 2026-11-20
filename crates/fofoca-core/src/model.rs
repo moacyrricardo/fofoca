@@ -102,6 +102,9 @@ pub struct MeetingMeta {
     /// RFC 3339 time the audio files were deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_deleted_at: Option<String>,
+    /// File name it was imported from (spec 012); `None` for meetings recorded in fo-foca.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -120,6 +123,9 @@ pub struct StartInfo {
     pub attendees: Vec<String>,
     pub labels: Vec<String>,
     pub calendar_uid: Option<String>,
+    /// Imports (spec 012): when the recording was made, and the source file name.
+    pub started_at: Option<String>,
+    pub imported_from: Option<String>,
 }
 
 /// A meeting as loaded from disk.

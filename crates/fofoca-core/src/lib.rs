@@ -8,6 +8,8 @@ pub mod capture;
 pub mod config;
 pub mod diarize;
 pub mod grounding;
+pub mod import;
+pub mod jobs;
 pub mod labels;
 pub mod llm;
 pub mod model;

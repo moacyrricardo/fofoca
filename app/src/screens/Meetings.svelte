@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { MeetingMeta } from "../lib/types";
+  import type { JobEvent, MeetingMeta } from "../lib/types";
+  import { JOB_STEPS } from "../lib/api";
   import { minutes, when } from "../lib/format";
   import mascot from "../assets/mascot.jpg";
   import summaryIcon from "../assets/summary.png";
@@ -7,9 +8,11 @@
   import UpNext from "./UpNext.svelte";
   import LabelEditor from "./LabelEditor.svelte";
 
-  let { meetings, recording, onopen, onstart, onresume, onsetup }: {
+  let { meetings, recording, jobs = {}, onimport, onopen, onstart, onresume, onsetup }: {
     meetings: MeetingMeta[];
     recording: boolean;
+    jobs?: Record<string, JobEvent>;
+    onimport: () => void;
     onopen: (id: string) => void;
     onstart: (title: string, attendees?: string[], labels?: string[], calendarUid?: string | null) => void;
     onresume: () => void;
@@ -56,7 +59,10 @@
     </div>
   </div>
 
-  <h2>Recent</h2>
+  <div class="recenthead">
+    <h2>Recent</h2>
+    <button class="btn ghost sm" onclick={onimport} title="A phone memo, a WhatsApp audio, a Zoom recording… — transcribed and summarized on this computer">⤓ Import recording…</button>
+  </div>
   {#if counts.length}
     <div class="filter" role="group" aria-label="Filter by label">
       <button class="fchip" class:on={!active.length} onclick={() => (filter = [])}>All <span>{meetings.length}</span></button>
@@ -80,7 +86,13 @@
             {#if m.labels?.length}<div class="rowlabels">{#each m.labels as l (l)}<span class="chip label">{l}</span>{/each}</div>{/if}
           </div>
           <div class="tail">
-            {#if m.finished}<span class="chip ok">✓ Saved</span>{:else}<span class="chip">Unfinished</span>{/if}
+            {#if jobs[m.id] && !["done", "failed"].includes(jobs[m.id].step)}
+              {@const j = jobs[m.id]}
+              <span class="chip gpu"><span class="spin sm"></span>{JOB_STEPS[j.step] ?? j.step}{j.step === "transcribing" ? ` ${Math.round(j.progress * 100)}%` : ""}</span>
+            {:else}
+              {#if m.imported_from}<span class="chip" title={m.imported_from}>⤓ Imported</span>{/if}
+              {#if m.finished}<span class="chip ok">✓ Saved</span>{:else}<span class="chip">Unfinished</span>{/if}
+            {/if}
           </div>
         </button>
       {/each}
@@ -105,6 +117,8 @@
   .meta { font-size: 12.5px; color: var(--ink-3); }
   .tail { margin-left: auto; display: flex; gap: 8px; }
   .startlabels { margin-top: 8px; }
+  .recenthead { display: flex; align-items: center; justify-content: space-between; }
+  .spin.sm { width: 11px; height: 11px; border-width: 2px; }
   .filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
   .fchip { background: none; border: 1px solid var(--line); color: var(--ink-2); border-radius: 20px; padding: 4px 11px; font-size: 12.5px; font-weight: 700; cursor: pointer; }
   .fchip span { color: var(--ink-3); font-weight: 600; margin-left: 3px; }

@@ -58,7 +58,7 @@ impl Store {
         let meta = MeetingMeta {
             id,
             title: if title.trim().is_empty() { format!("Meeting {}", now.format("%d/%m %H:%M")) } else { title.trim().to_string() },
-            started_at: now.to_rfc3339(),
+            started_at: info.started_at.clone().unwrap_or_else(|| now.to_rfc3339()),
             duration_s: 0.0,
             finished: false,
             attendees: info.attendees.clone(),
@@ -69,6 +69,7 @@ impl Store {
             processed: false,
             keep_audio: None,
             audio_deleted_at: None,
+            imported_from: info.imported_from.clone(),
         };
         self.save_meta(&meta)?;
         Ok(meta)

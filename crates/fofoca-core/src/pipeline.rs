@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use crate::config::Config;
 use crate::store::Store;
+use crate::model::{Segment, Track, Word};
 use crate::{audio, diarize, speakers};
 
 pub const STEP_SPEAKERS: &str = "speakers";
@@ -25,6 +26,120 @@ pub enum StepResult {
     Done { speakers: usize, took_s: f64 },
     /// Nothing to do or not possible right now — the message says why (shown as a notice).
     Skipped(String),
+}
+
+pub const STEP_CONVERT: &str = "converting";
+pub const STEP_TRANSCRIBE: &str = "transcribing";
+
+/// Callbacks for long offline work (imports, spec 012).
+pub struct Hooks<'a> {
+    /// `(step, fraction done 0..=1)`.
+    pub progress: &'a dyn Fn(&str, f64),
+    /// True while a live recording needs the GPU: model servers are stopped until it's false.
+    pub yield_gpu: &'a dyn Fn() -> bool,
+}
+
+impl Hooks<'_> {
+    fn wait_for_gpu(&self) {
+        while (self.yield_gpu)() {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+}
+
+/// Transcribe a whole recording like a live session would (quiet-point chunks, VAD, prompt
+/// carry-over), on the Call track. Gives the GPU back between chunks if a recording starts.
+pub fn transcribe_samples(cfg: &Config, samples: &[i16], hooks: &Hooks) -> Result<Vec<Segment>> {
+    use crate::servers::{Kind, ModelServer};
+    use crate::whisper::WhisperClient;
+    let sr = audio::SAMPLE_RATE as usize;
+    let chunk = cfg.chunk_seconds as usize * sr;
+    let (mut pos, mut prompt, mut out) = (0, String::new(), Vec::new());
+    let mut asr: Option<(ModelServer, WhisperClient)> = None;
+    while pos < samples.len() {
+        if (hooks.yield_gpu)() {
+            asr = None; // stops the server
+            hooks.wait_for_gpu();
+        }
+        if asr.is_none() {
+            let server = ModelServer::start(Kind::Whisper, cfg)?;
+            let client = WhisperClient::new(&server.base_url)?;
+            asr = Some((server, client));
+        }
+        let Some((_, client)) = &asr else { unreachable!() };
+        (hooks.progress)(STEP_TRANSCRIBE, pos as f64 / samples.len() as f64);
+        let rest = &samples[pos..];
+        let n = audio::quiet_cut(&rest[..rest.len().min(chunk + 1)], &[], chunk, 3 * sr);
+        let offset = pos as f64 / sr as f64;
+        if audio::rms(&rest[..n]) >= 0.003 {
+            for s in client.transcribe(audio::wav_bytes(&rest[..n]), &cfg.language, &prompt)? {
+                prompt = s.text.clone();
+                out.push(Segment {
+                    start: offset + s.start,
+                    end: offset + s.end,
+                    words: s.words.into_iter().map(|w| Word { start: offset + w.start, end: offset + w.end, ..w }).collect(),
+                    text: s.text,
+                    track: Track::Call,
+                    speaker: None,
+                });
+            }
+        }
+        pos += n;
+    }
+    Ok(out)
+}
+
+/// Import a recording made elsewhere into meeting `id` (created by the caller): convert, transcribe,
+/// separate speakers, write checked notes, apply the audio policy. Each step is recorded so the
+/// meeting page can show progress; a failing step after transcription doesn't lose the transcript.
+pub fn run_import(store: &Store, cfg: &Config, id: &str, src: &std::path::Path, hooks: &Hooks) -> Result<()> {
+    (hooks.progress)(STEP_CONVERT, 0.0);
+    let wav = store.dir(id).join("system.wav");
+    crate::import::convert(src, &wav)?;
+    let samples = audio::read_wav(&wav)?;
+    let duration = samples.len() as f64 / audio::SAMPLE_RATE as f64;
+    let segments = transcribe_samples(cfg, &samples, hooks)?;
+    for s in &segments {
+        store.append_segment(id, s)?;
+    }
+    store.update_meta(id, |m| m.duration_s = duration)?;
+    mark_done(store, id, STEP_TRANSCRIBE)?;
+
+    let mut ok = true;
+    (hooks.progress)(STEP_SPEAKERS, 0.0);
+    match separate_speakers(store, cfg, id) {
+        Ok(StepResult::Done { .. }) => {}
+        Ok(StepResult::Skipped(_)) | Err(_) => ok = false,
+    }
+    let words: usize = segments.iter().map(|s| s.text.split_whitespace().count()).sum();
+    if words >= crate::session::MIN_WORDS_TO_SUMMARIZE {
+        (hooks.progress)(STEP_NOTES, 0.0);
+        hooks.wait_for_gpu();
+        // a failure here keeps the transcript and speakers; the notes can be written again later
+        if write_notes(store, cfg, id).is_err() {
+            ok = false;
+        }
+    }
+    store.update_meta(id, |m| {
+        m.finished = true;
+        m.processed = ok;
+    })?;
+    crate::retention::apply(store, &cfg.audio, chrono::Local::now().fixed_offset(), Some(id), false)?;
+    Ok(())
+}
+
+/// Load the summary model and write checked notes (+ the Markdown copy as the final summary).
+pub fn write_notes(store: &Store, cfg: &Config, id: &str) -> Result<()> {
+    use crate::model::{Summary, SummaryKind};
+    use crate::servers::{Kind, ModelServer};
+    let m = store.load(id)?;
+    let server = ModelServer::start(Kind::Llm, cfg)?;
+    let n = crate::notes::extract(&crate::llm::LlmClient::new(&server.base_url)?, &m.segments, &m.speakers, &m.meta, cfg)?;
+    drop(server);
+    store.save_notes(id, &n)?;
+    let text = crate::notes::to_markdown(&n, &cfg.language);
+    store.add_summary(id, &Summary { kind: SummaryKind::Final, at_s: m.meta.duration_s, text, model: n.model.clone(), gen_tokens_per_s: n.gen_tokens_per_s })?;
+    mark_done(store, id, STEP_NOTES)
 }
 
 /// Separate the voices on the call track (CPU) and put them on the transcript. Re-running starts

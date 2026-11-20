@@ -1,6 +1,7 @@
 // Scripted stand-in for the Rust backend, used only outside Tauri (browser preview).
 
 import { normalizeLabels } from "./format";
+import type { JobEvent } from "./types";
 import type { CalendarEvent, CalendarSettings, ConfigView, Meeting, MeetingMeta, Segment, SessionEvent } from "./types";
 
 const LINES: [string, "you" | "call"][] = [
@@ -71,6 +72,12 @@ let timers: number[] = [];
 let live: MeetingMeta | null = null;
 const emit = (e: SessionEvent) => listener?.(e);
 
+let jobListener: ((e: JobEvent) => void) | null = null;
+export function onJob(cb: (e: JobEvent) => void): () => void {
+  jobListener = cb;
+  return () => (jobListener = null);
+}
+
 export function onSession(cb: (e: SessionEvent) => void): () => void {
   listener = cb;
   return () => (listener = null);
@@ -95,6 +102,18 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       const name = String(args?.name ?? "").trim();
       m.speakers = { ...m.speakers, [String(args?.speaker)]: { name: name || null } };
       return structuredClone(m) as T;
+    }
+    case "pick_recording": return "/home/you/Gravações/reuniao-cliente-bh.m4a" as T;
+    case "import_recording": {
+      const id = `2026-11-20-0900${meetings.length}`;
+      const meta: MeetingMeta = { id, title: String(args?.title ?? "") || "reuniao-cliente-bh", started_at: "2026-11-20T09:00:00-03:00", duration_s: 0, finished: false, imported_from: "reuniao-cliente-bh.m4a", labels: normalizeLabels((args?.labels as string[]) ?? []) };
+      meetings.unshift({ meta, segments: [], summaries: [] });
+      const steps: [JobEvent["step"], number][] = [["converting", 0], ["transcribing", 0.1], ["transcribing", 0.4], ["transcribing", 0.8], ["speakers", 0], ["notes", 0], ["done", 1]];
+      steps.forEach(([step, progress], i) => window.setTimeout(() => {
+        if (step === "done") { const m = meetings.find((x) => x.meta.id === id)!; m.meta = { ...m.meta, finished: true, duration_s: 1920 }; m.segments = separated; m.speakers = { s1: {}, s2: {} }; }
+        jobListener?.({ meeting_id: id, step, progress });
+      }, 600 + i * 1100));
+      return meta as T;
     }
     case "storage": return { audio: audio, audio_bytes: 412_000_000, meetings_with_audio: 3 } as T;
     case "set_audio_policy": audio = args?.audio as typeof audio; return { audio, audio_bytes: audio.keep === "always" ? 412_000_000 : 120_000_000, meetings_with_audio: audio.keep === "always" ? 3 : 1 } as T;

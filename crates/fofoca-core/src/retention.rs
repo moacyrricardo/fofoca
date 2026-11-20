@@ -80,6 +80,7 @@ mod tests {
             processed,
             keep_audio: keep,
             audio_deleted_at: None,
+            imported_from: None,
         }
     }
 

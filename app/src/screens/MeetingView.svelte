@@ -2,12 +2,14 @@
   import { api, preview } from "../lib/api";
   import { tick } from "svelte";
   import { markdown, minutes, mmss, pausesBefore, speakerColor, speakerName, when } from "../lib/format";
-  import type { Meeting } from "../lib/types";
+  import type { JobEvent, Meeting } from "../lib/types";
+  import { JOB_STEPS } from "../lib/api";
   import summaryIcon from "../assets/summary.png";
   import transcriptionIcon from "../assets/transcription.png";
   import LabelEditor from "./LabelEditor.svelte";
 
-  let { id, onback, notify }: { id: string; onback: () => void; notify: (t: string, e?: boolean) => void } = $props();
+  let { id, job, onback, notify }: { id: string; job?: JobEvent; onback: () => void; notify: (t: string, e?: boolean) => void } = $props();
+  const importing = $derived(!!job && !["done", "failed"].includes(job.step));
 
   let meeting = $state<Meeting | null>(null);
   let tab = $state<"summary" | "tasks" | "transcript" | "speakers">("summary");
@@ -57,6 +59,7 @@
 
   $effect(() => {
     const want = id;
+    void (job?.step === "done"); // reload when an import of this meeting finishes
     meeting = null;
     api.meeting(want).then((m) => {
       if (want === id) {
@@ -132,6 +135,12 @@
     </div>
     {#if meeting.meta.attendees?.length}
       <div class="faint small">Invited: {meeting.meta.attendees.join(", ")}</div>
+    {/if}
+    {#if importing && job}
+      <div class="card importing"><span class="spin"></span><div><b>Importing{meeting.meta.imported_from ? ` ${meeting.meta.imported_from}` : ""}</b>
+        <div class="faint small">{JOB_STEPS[job.step] ?? job.step}{job.step === "transcribing" ? ` · ${Math.round(job.progress * 100)}%` : ""} — the notes appear here when it's done. Recording a meeting pauses the import.</div></div></div>
+    {:else if meeting.meta.imported_from}
+      <div class="faint small">⤓ Imported from {meeting.meta.imported_from}</div>
     {/if}
     <div class="mlabels"><LabelEditor labels={meeting.meta.labels ?? []} onchange={saveLabels} /></div>
     {#if meeting.meta.finished}
@@ -259,6 +268,7 @@
   .back:hover { color: var(--ink); }
   .small { font-size: 13px; }
   .mlabels { margin-top: 10px; }
+  .importing { display: flex; gap: 12px; align-items: center; margin-top: 12px; max-width: 760px; }
   .audio { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
   .keep { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
   .keep input { accent-color: var(--teal); }
