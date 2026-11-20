@@ -21,6 +21,7 @@ pub mod pipeline;
 pub mod proc;
 pub mod retention;
 pub mod prompts;
+pub mod queue;
 pub mod servers;
 pub mod session;
 pub mod slicer;

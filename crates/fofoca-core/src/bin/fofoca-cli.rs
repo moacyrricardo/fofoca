@@ -215,14 +215,17 @@ fn bench_latency(cfg: &Config, args: &[String]) -> Result<()> {
                 client.transcribe(audio::wav_bytes(&mix), &cfg.language, &prompt)?.into_iter().map(|r| tracks::segment(r, Track::Call, offset)).collect()
             }
         } else {
-            let parts = tracks::with_speech(cm, cs);
+            // spec 018's live path, kept for comparison: each track of the chunk with speech in
+            // its own request, merged by time
+            let parts: Vec<(Track, &[i16])> = [(Track::You, cm), (Track::Call, cs)].into_iter().filter(|(_, x)| audio::has_speech(x)).collect();
             sent = parts.len();
             kinds[parts.iter().map(|p| if p.0 == Track::Call { 1 } else { 2 }).sum::<usize>()] += 1;
-            let out = tracks::transcribe_parts(&parts, offset, |x| client.transcribe(audio::wav_bytes(x), &cfg.language, &prompt));
-            if let Some((_, e)) = out.errors.into_iter().next() {
-                return Err(e);
+            let (mut you, mut them) = (Vec::new(), Vec::new());
+            for &(track, x) in &parts {
+                let lines = client.transcribe(audio::wav_bytes(x), &cfg.language, &prompt)?.into_iter().map(|r| tracks::segment(r, track, offset));
+                if track == Track::You { you.extend(lines) } else { them.extend(lines) }
             }
-            out.segments
+            tracks::merge(you, them).0
         };
         let took = t0.elapsed().as_secs_f64();
         t += took;
