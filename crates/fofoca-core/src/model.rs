@@ -92,6 +92,16 @@ pub struct MeetingMeta {
     /// Post-call steps that finished (`"speakers"`, …), so a failed step can be retried alone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps_done: Vec<String>,
+    /// Every post-call step that needs the audio has succeeded (spec 011: only then can
+    /// "delete after processing" remove it).
+    #[serde(default)]
+    pub processed: bool,
+    /// Per-meeting override: `Some(true)` keeps the audio whatever the global setting says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_audio: Option<bool>,
+    /// RFC 3339 time the audio files were deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_deleted_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

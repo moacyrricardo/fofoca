@@ -65,6 +65,7 @@ const events: CalendarEvent[] = [
 ];
 let calSettings: CalendarSettings = { sources: [{ id: "cal-1", kind: "link", label: "Trabalho", location: "calendar.google.com", default_labels: ["trabalho"] }], only_with_call_link: true, notify_before: true, auto_record: false };
 
+let audio: { keep: "always" | "after_processing" | "days"; keep_days: number } = { keep: "after_processing", keep_days: 30 };
 let listener: ((e: SessionEvent) => void) | null = null;
 let timers: number[] = [];
 let live: MeetingMeta | null = null;
@@ -93,6 +94,18 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       const m = meetings.find((x) => x.meta.id === args?.id)!;
       const name = String(args?.name ?? "").trim();
       m.speakers = { ...m.speakers, [String(args?.speaker)]: { name: name || null } };
+      return structuredClone(m) as T;
+    }
+    case "storage": return { audio: audio, audio_bytes: 412_000_000, meetings_with_audio: 3 } as T;
+    case "set_audio_policy": audio = args?.audio as typeof audio; return { audio, audio_bytes: audio.keep === "always" ? 412_000_000 : 120_000_000, meetings_with_audio: audio.keep === "always" ? 3 : 1 } as T;
+    case "set_keep_audio": {
+      const m = meetings.find((x) => x.meta.id === args?.id)!;
+      m.meta = { ...m.meta, keep_audio: args?.keep ? true : null };
+      return structuredClone(m) as T;
+    }
+    case "delete_audio": {
+      const m = meetings.find((x) => x.meta.id === args?.id)!;
+      m.meta = { ...m.meta, audio_deleted_at: new Date().toISOString() };
       return structuredClone(m) as T;
     }
     case "write_notes": {

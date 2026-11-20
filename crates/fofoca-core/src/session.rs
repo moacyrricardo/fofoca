@@ -130,6 +130,7 @@ impl Session {
             asr: None,
             segments: Vec::new(),
             speakers: Default::default(),
+            post_ok: true,
             offset_s: 0.0,
             pause_checked_at: 0,
         };
@@ -244,6 +245,8 @@ struct Worker {
     sys: Capture,
     asr: Option<(ModelServer, WhisperClient)>,
     segments: Vec<Segment>,
+    /// Every post-call step that needs the audio succeeded (spec 011).
+    post_ok: bool,
     /// Named voices once speakers are separated (spec 003).
     speakers: std::collections::BTreeMap<String, crate::model::SpeakerInfo>,
     /// Meeting time (s) at which the next chunk starts.
@@ -274,9 +277,11 @@ impl Worker {
             return;
         }
         let duration = self.offset_s;
+        let processed = self.post_ok;
         match self.store.update_meta(&self.meeting.id, |m| {
             m.duration_s = duration;
             m.finished = true;
+            m.processed = processed;
         }) {
             Ok(m) => self.meeting = m,
             Err(_) => {
@@ -284,6 +289,17 @@ impl Worker {
                 self.meeting.finished = true;
                 let _ = self.store.save_meta(&self.meeting);
             }
+        }
+        // Spec 011: with "delete after processing", the audio goes now.
+        match crate::retention::apply(&self.store, &self.cfg.audio, chrono::Local::now().fixed_offset(), Some(&self.meeting.id), false) {
+            Ok(freed) if !freed.is_empty() => {
+                self.notice("Audio deleted after processing, as set in Settings — the transcript and notes are kept.");
+                if let Ok(m) = self.store.load(&self.meeting.id) {
+                    self.meeting = m.meta;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => self.error(format!("deleting audio: {e:#}")),
         }
         (self.emit)(SessionEvent::Finished { meeting: self.meeting.clone() });
     }
@@ -389,8 +405,14 @@ impl Worker {
                     }
                     Err(e) => self.error(format!("reloading the transcript: {e:#}")),
                 },
-                Ok(StepResult::Skipped(msg)) => self.notice(&msg),
-                Err(e) => self.error(format!("speaker separation failed (the transcript is kept as is): {e:#}")),
+                Ok(StepResult::Skipped(msg)) => {
+                    self.post_ok = false;
+                    self.notice(&msg);
+                }
+                Err(e) => {
+                    self.post_ok = false;
+                    self.error(format!("speaker separation failed (the transcript is kept as is): {e:#}"));
+                }
             }
         }
         if !final_summary {
@@ -507,6 +529,9 @@ impl Worker {
                 }
                 Err(e) => self.error(format!("saving notes: {e:#}")),
             }
+        }
+        if kind == SummaryKind::Final && (fallback.is_some() || result.is_err()) {
+            self.post_ok = false;
         }
         if let Some(why) = fallback {
             self.notice(&format!("Couldn't write checked notes ({why}); wrote a plain summary instead."));

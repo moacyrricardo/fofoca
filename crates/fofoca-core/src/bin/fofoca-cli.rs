@@ -15,6 +15,7 @@
 //! fofoca-cli diarize-wav <file.wav> [--threshold T] [--max N]   print speaker turns of a WAV
 //! fofoca-cli list [--label L]               list stored meetings (optionally only those labelled L)
 //! fofoca-cli labels                         known labels with meeting counts
+//! fofoca-cli retention [--dry-run]          delete meeting audio per the [audio] policy
 //! fofoca-cli label <meeting-id> add|rm <label>
 //! fofoca-cli calendar <list|add LINK|PATH|remove ID|upcoming [DAYS]|labels ID [LABEL…]>
 //! ```
@@ -72,6 +73,15 @@ fn run() -> Result<()> {
             Ok(())
         }
         Some("label") => label(&store, &args[1..]),
+        Some("retention") => {
+            let dry = args.iter().any(|a| a == "--dry-run");
+            let done = fofoca_core::retention::apply(&store, &cfg.audio, chrono::Local::now().fixed_offset(), None, dry)?;
+            for (id, bytes) in &done {
+                println!("{id}  {:.1} MB{}", *bytes as f64 / 1e6, if dry { "  (would delete)" } else { "  deleted" });
+            }
+            eprintln!("policy {:?} ({} days): {} meeting(s)", cfg.audio.keep, cfg.audio.keep_days, done.len());
+            Ok(())
+        }
         _ => {
             eprintln!("usage: fofoca-cli <config|transcribe|record|summarize|list|labels|label|calendar> …");
             Ok(())
@@ -313,6 +323,9 @@ fn eval_notes(cfg: &Config, args: &[String]) -> Result<()> {
         calendar_uid: None,
         pauses: vec![],
         steps_done: vec![],
+        processed: false,
+        keep_audio: None,
+        audio_deleted_at: None,
     };
     let speakers = Default::default();
     let transcript = prompts::transcript_text(&segments, &speakers, &cfg.language);

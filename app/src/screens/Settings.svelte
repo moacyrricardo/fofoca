@@ -2,6 +2,7 @@
   import type { ConfigView } from "../lib/types";
   import settingsIcon from "../assets/settings.png";
   import CalendarsCard from "./CalendarsCard.svelte";
+  import StorageCard from "./StorageCard.svelte";
 
   let { config, notify }: { config: ConfigView | null; notify: (t: string, e?: boolean) => void } = $props();
 </script>
@@ -43,6 +44,7 @@
       </div>
     </div>
     <CalendarsCard {notify} />
+    <StorageCard {notify} />
     <div class="card files">
       <div><span class="faint">Config file</span> <code>{config.path}</code></div>
       <div><span class="faint">Meetings folder</span> <code>{config.meetings_dir}</code></div>

@@ -23,6 +23,26 @@
     document.getElementById(`line-${t}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
+  let confirmDelete = $state(false);
+  async function keepAudio(keep: boolean) {
+    if (!meeting) return;
+    try {
+      meeting = await api.setKeepAudio(meeting.meta.id, keep);
+    } catch (e) {
+      notify(String(e), true);
+    }
+  }
+  async function deleteAudio() {
+    if (!meeting) return;
+    confirmDelete = false;
+    try {
+      meeting = await api.deleteAudio(meeting.meta.id);
+      notify("Audio deleted — the transcript and notes are kept.");
+    } catch (e) {
+      notify(String(e), true);
+    }
+  }
+
   async function writeNotes() {
     if (!meeting) return;
     writing = true;
@@ -114,6 +134,21 @@
       <div class="faint small">Invited: {meeting.meta.attendees.join(", ")}</div>
     {/if}
     <div class="mlabels"><LabelEditor labels={meeting.meta.labels ?? []} onchange={saveLabels} /></div>
+    {#if meeting.meta.finished}
+      <div class="audio faint small">
+        {#if meeting.meta.audio_deleted_at}
+          🔇 Audio deleted {when(meeting.meta.audio_deleted_at)} — transcript and notes are kept.
+        {:else}
+          🎙 Audio kept on this computer.
+          <label class="keep"><input type="checkbox" checked={meeting.meta.keep_audio === true} onchange={(e) => keepAudio((e.target as HTMLInputElement).checked)} /> Keep it regardless of the Storage setting</label>
+          {#if confirmDelete}
+            <span class="sure">Delete the recording? <button class="link danger" onclick={deleteAudio}>Delete</button> · <button class="link" onclick={() => (confirmDelete = false)}>Cancel</button></span>
+          {:else}
+            <button class="link" onclick={() => (confirmDelete = true)}>Delete audio now</button>
+          {/if}
+        {/if}
+      </div>
+    {/if}
 
     <div class="tabs">
       <button class="tab" class:on={tab === "summary"} onclick={() => (tab = "summary")}><img src={summaryIcon} alt="" />Summary</button>
@@ -197,7 +232,7 @@
           <datalist id={attendeeList}>{#each meeting.meta.attendees ?? [] as a}<option value={a}></option>{/each}</datalist>
         {/if}
         <div class="again">
-          <button class="btn ghost sm" onclick={separate} disabled={separating}>{separating ? "Separating voices…" : voices.length ? "↻ Separate again" : "Separate speakers"}</button>
+          <button class="btn ghost sm" onclick={separate} disabled={separating || !!meeting.meta.audio_deleted_at} title={meeting.meta.audio_deleted_at ? "The audio was deleted" : ""}>{separating ? "Separating voices…" : voices.length ? "↻ Separate again" : "Separate speakers"}</button>
           {#if voices.length}<span class="faint small">keeps the names given above</span>{/if}
         </div>
       </div>
@@ -224,6 +259,11 @@
   .back:hover { color: var(--ink); }
   .small { font-size: 13px; }
   .mlabels { margin-top: 10px; }
+  .audio { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+  .keep { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  .keep input { accent-color: var(--teal); }
+  .link { background: none; border: 0; color: var(--teal); cursor: pointer; font-weight: 700; padding: 0; font-size: inherit; }
+  .link.danger { color: var(--coral); }
   .pausemark { text-align: center; color: var(--ink-3); font-size: 12px; font-weight: 700; padding: 8px 0; border-bottom: 1px solid #22405c; }
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 18px 0 16px; }
   .tab { background: none; border: 0; color: var(--ink-2); font-weight: 800; font-size: 14px; padding: 9px 14px; border-bottom: 3px solid transparent; cursor: pointer; display: flex; gap: 7px; align-items: center; }

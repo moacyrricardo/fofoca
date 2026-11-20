@@ -66,6 +66,9 @@ impl Store {
             calendar_uid: info.calendar_uid.clone().filter(|u| !u.is_empty()),
             pauses: Vec::new(),
             steps_done: Vec::new(),
+            processed: false,
+            keep_audio: None,
+            audio_deleted_at: None,
         };
         self.save_meta(&meta)?;
         Ok(meta)
