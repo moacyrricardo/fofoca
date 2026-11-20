@@ -14,3 +14,4 @@
 | 010 | done   | recording-controls          | moacyrricardo/spec-010-recording-controls | —     | pause + adaptive chunking |
 | 011 | todo   | audio-retention             | —                                        | —     | after 003/005 (they need the audio) |
 | 012 | todo   | import-recording            | —                                        | —     | uses the 003 post-call pipeline; feeds 008 |
+| 013 | done   | servers-die-with-app        | moacyrricardo/spec-013-servers-die-with-app | —  | found while measuring 005 |
