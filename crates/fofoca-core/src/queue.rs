@@ -21,8 +21,11 @@ use crate::slicer::Slice;
 use crate::tracks;
 use crate::whisper::RawSegment;
 
-/// More queued audio than this means the worker is behind and merges (Decision 4).
-pub const BACKLOG_S: f64 = 20.0;
+/// More queued audio than this means the worker is behind and merges (Decision 4). The spec's
+/// first guess was 20 s; on the measured 10:38 call (MX230, Balanced) 10 s gave about the same
+/// Whisper time (1.05× vs 1.06× real time) with a lower delay (median 17.5 s vs 23.1 s, max 44 s
+/// vs 78 s) and a lower peak backlog (56 s vs 75 s).
+pub const BACKLOG_S: f64 = 10.0;
 /// Merged slices are at most this far apart…
 pub const MERGE_GAP_S: f64 = 3.0;
 /// …and span at most this much, under Whisper's 30 s window.
