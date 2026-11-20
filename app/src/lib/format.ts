@@ -72,3 +72,19 @@ export function pausesBefore(pauses: number[], segs: { start: number }[], i: num
   const hi = i < segs.length ? segs[i].start : Infinity;
   return pauses.filter((p) => p > lo && p <= hi);
 }
+
+/** Who said a line: the given name, "Person N" for an unnamed voice, else You / Call (spec 003). */
+export function speakerName(seg: { speaker?: string | null; track: string }, speakers: Record<string, { name?: string | null }> = {}): string {
+  if (seg.speaker === "you" || (!seg.speaker && seg.track === "you")) return "You";
+  if (seg.speaker) return speakers[seg.speaker]?.name || `Person ${seg.speaker.replace(/^s/, "")}`;
+  return "Call";
+}
+
+const SPEAKER_COLORS = ["#f6a27f", "#c8a2f0", "#8fd694", "#f2d26b", "#7fb8f6", "#f28fb1", "#9be0d4", "#d9b38c"];
+/** Stable colour per voice; the mic stays teal and unseparated call lines coral (as before). */
+export function speakerColor(seg: { speaker?: string | null; track: string }): string {
+  if (seg.speaker === "you" || (!seg.speaker && seg.track === "you")) return "var(--teal)";
+  if (!seg.speaker) return "var(--coral)";
+  const n = parseInt(seg.speaker.replace(/^s/, ""), 10) || 1;
+  return SPEAKER_COLORS[(n - 1) % SPEAKER_COLORS.length];
+}

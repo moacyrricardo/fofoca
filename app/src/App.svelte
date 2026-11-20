@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, onSession, preview } from "./lib/api";
+  import { api, onJob, onSession, preview } from "./lib/api";
   import { live, resetLive } from "./lib/live.svelte";
-  import type { CalendarEvent, ConfigView, MeetingMeta, SessionEvent } from "./lib/types";
+  import type { CalendarEvent, ConfigView, JobEvent, MeetingMeta, SessionEvent } from "./lib/types";
   import { shortModel } from "./lib/format";
   import Meetings from "./screens/Meetings.svelte";
   import Live from "./screens/Live.svelte";
@@ -28,6 +28,31 @@
   async function refresh() {
     try {
       meetings = await api.meetings();
+    } catch (e) {
+      notify(String(e), true);
+    }
+  }
+
+  // Imports in progress, by meeting id (spec 012).
+  let jobs = $state<Record<string, JobEvent>>({});
+  function onJobEvent(e: JobEvent) {
+    jobs[e.meeting_id] = e;
+    if (e.step === "done" || e.step === "failed") {
+      const title = meetings.find((m) => m.id === e.meeting_id)?.title ?? "recording";
+      if (e.step === "done") notify(`“${title}” is ready.`);
+      else notify(`Importing “${title}” failed: ${e.error ?? "unknown error"}`, true);
+      refresh();
+    }
+  }
+
+  async function importRecording() {
+    try {
+      const path = await api.pickRecording();
+      if (!path) return;
+      const m = await api.importRecording(path);
+      jobs[m.id] = { meeting_id: m.id, step: "queued", progress: 0 };
+      await refresh();
+      notify(`Importing “${m.title}” — it'll be ready in a few minutes.`);
     } catch (e) {
       notify(String(e), true);
     }
@@ -139,6 +164,8 @@
     const calTimer = setInterval(calendarTick, 20_000);
     let unlisten: (() => void) | undefined;
     onSession(handle).then((u) => (unlisten = u));
+    let unlistenJobs: (() => void) | undefined;
+    onJob(onJobEvent).then((u) => (unlistenJobs = u));
     refresh();
     api.config().then((c) => (config = c)).catch((e) => notify(String(e), true));
     api.activeSession().then((m) => {
@@ -154,12 +181,14 @@
         if (h === "live" || h === "processing") {
           await start("Sync semanal — produto");
           if (h === "processing") setTimeout(() => api.stop(true).then(() => (screen = "processing")), 3000);
-        } else if (h === "meeting") open("2026-11-19-140200");
+        } else if (["meeting", "speakers", "transcript", "tasks"].includes(h)) open("2026-11-19-140200");
         else if (h === "settings") screen = "settings";
+        else if (h === "import") importRecording();
       }, 50);
     }
     return () => {
       unlisten?.();
+      unlistenJobs?.();
       clearInterval(calTimer);
     };
   });
@@ -213,13 +242,13 @@
       </div>
     {/if}
     {#if screen === "meetings"}
-      <Meetings {meetings} {recording} onopen={open} onstart={start} onresume={() => (screen = "live")} onsetup={() => (screen = "settings")} />
+      <Meetings {meetings} {recording} {jobs} onimport={importRecording} onopen={open} onstart={start} onresume={() => (screen = "live")} onsetup={() => (screen = "settings")} />
     {:else if screen === "live"}
       <Live {config} onstart={start} onstop={() => (screen = "processing")} {notify} />
     {:else if screen === "processing"}
       <Processing onopen={(id) => open(id)} />
     {:else if screen === "meeting" && openId}
-      <MeetingView id={openId} onback={() => go("meetings")} {notify} />
+      <MeetingView id={openId} job={jobs[openId]} onback={() => go("meetings")} {notify} />
     {:else if screen === "settings"}
       <Settings {config} {notify} />
     {/if}
@@ -231,8 +260,8 @@
 {/if}
 
 <style>
-  .app { display: flex; height: 100%; }
-  .side { width: 212px; background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 16px 12px; gap: 4px; flex: none; }
+  .app { display: flex; height: 100%; --side-w: 212px; }
+  .side { width: var(--side-w); background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 16px 12px; gap: 4px; flex: none; }
   .brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 16px; }
   .brand img { width: 38px; height: 38px; border-radius: 10px; }
   .brand b { font-size: 20px; }

@@ -1,6 +1,6 @@
 //! Tauri shell: exposes fofoca-core to the UI as commands and forwards session events.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use fofoca_core::calendar::{CalendarEvent, CalendarSettings, CalendarSource, Calendars, Keyring};
@@ -13,12 +13,21 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
 struct AppState {
-    cfg: Config,
+    /// Behind a lock so Settings can change the audio policy while the app runs (spec 011).
+    cfg: RwLock<Config>,
     store: Store,
     session: Mutex<Option<Session>>,
     calendars: Calendars<Keyring>,
+    /// Imports run here, one at a time (spec 012).
+    jobs: fofoca_core::jobs::Jobs,
     /// Upcoming events, refreshed at most every CALENDAR_TTL unless forced.
     upcoming: Mutex<Option<(Instant, Upcoming)>>,
+}
+
+impl AppState {
+    fn cfg(&self) -> Config {
+        self.cfg.read().unwrap().clone()
+    }
 }
 
 const CALENDAR_TTL: Duration = Duration::from_secs(300);
@@ -48,10 +57,10 @@ struct ConfigView {
 fn get_config(state: State<AppState>) -> ConfigView {
     ConfigView {
         path: config_path().display().to_string(),
-        meetings_dir: state.cfg.meetings_dir().display().to_string(),
-        whisper_model: state.cfg.whisper_name(),
-        llm_model: state.cfg.llm_name(),
-        config: state.cfg.clone(),
+        meetings_dir: state.cfg().meetings_dir().display().to_string(),
+        whisper_model: state.cfg().whisper_name(),
+        llm_model: state.cfg().llm_name(),
+        config: state.cfg(),
     }
 }
 
@@ -89,6 +98,136 @@ fn get_meeting(state: State<AppState>, id: String) -> CmdResult<Meeting> {
     state.store.load(&id).map_err(err)
 }
 
+/// Name a voice on the call (spec 003); an empty name goes back to "Person N".
+#[tauri::command]
+fn rename_speaker(state: State<AppState>, id: String, speaker: String, name: String) -> CmdResult<Meeting> {
+    state.store.rename_speaker(&id, &speaker, &name).map_err(err)?;
+    state.store.load(&id).map_err(err)
+}
+
+/// (Re-)run speaker separation on a stored meeting. CPU-bound, so it runs on a blocking thread.
+#[tauri::command]
+async fn separate_speakers(app: AppHandle, id: String) -> CmdResult<Meeting> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if state.session.lock().unwrap().as_ref().is_some_and(|s| s.meeting.id == id) {
+            return Err("this meeting is still being recorded".to_string());
+        }
+        match fofoca_core::pipeline::separate_speakers(&state.store, &state.cfg(), &id).map_err(err)? {
+            fofoca_core::pipeline::StepResult::Done { .. } => state.store.load(&id).map_err(err),
+            fofoca_core::pipeline::StepResult::Skipped(msg) => Err(msg),
+        }
+    })
+    .await
+    .map_err(err)?
+}
+
+/// (Re-)write grounded notes (spec 005). Loads the summary model, so not while recording.
+#[tauri::command]
+async fn write_notes(app: AppHandle, id: String) -> CmdResult<Meeting> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if state.session.lock().unwrap().is_some() {
+            return Err("a recording is running — the GPU is busy with it".to_string());
+        }
+        let m = state.store.load(&id).map_err(err)?;
+        let server = fofoca_core::servers::ModelServer::start(fofoca_core::servers::Kind::Llm, &state.cfg()).map_err(err)?;
+        let client = fofoca_core::llm::LlmClient::new(&server.base_url).map_err(err)?;
+        let notes = fofoca_core::notes::extract(&client, &m.segments, &m.speakers, &m.meta, &state.cfg()).map_err(err)?;
+        drop(server);
+        state.store.save_notes(&id, &notes).map_err(err)?;
+        let _ = fofoca_core::pipeline::mark_done(&state.store, &id, fofoca_core::pipeline::STEP_NOTES);
+        state.store.load(&id).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Keep this meeting's audio regardless of the global setting (spec 011), or follow it again.
+#[tauri::command]
+fn set_keep_audio(state: State<AppState>, id: String, keep: bool) -> CmdResult<Meeting> {
+    state.store.update_meta(&id, |m| m.keep_audio = keep.then_some(true)).map_err(err)?;
+    state.store.load(&id).map_err(err)
+}
+
+#[tauri::command]
+fn delete_audio(state: State<AppState>, id: String) -> CmdResult<Meeting> {
+    if state.session.lock().unwrap().as_ref().is_some_and(|s| s.meeting.id == id) {
+        return Err("this meeting is still being recorded".into());
+    }
+    fofoca_core::retention::delete_audio(&state.store, &id).map_err(err)?;
+    state.store.load(&id).map_err(err)
+}
+
+/// The meeting's audio files that exist, for replay (spec 014). The webview loads them through
+/// the asset protocol, whose scope is the meetings folder only.
+#[tauri::command]
+fn audio_tracks(state: State<AppState>, id: String) -> CmdResult<fofoca_core::store::AudioTracks> {
+    state.store.audio_tracks(&id).map_err(err)
+}
+
+#[derive(Serialize)]
+struct StorageView {
+    audio: fofoca_core::config::AudioConfig,
+    /// Audio still on disk across all meetings, in bytes.
+    audio_bytes: u64,
+    meetings_with_audio: usize,
+}
+
+#[tauri::command]
+fn storage(state: State<AppState>) -> CmdResult<StorageView> {
+    let ids: Vec<String> = state.store.list(None).map_err(err)?.into_iter().map(|m| m.id).collect();
+    let sizes: Vec<u64> = ids.iter().map(|id| fofoca_core::retention::audio_bytes(&state.store, id)).collect();
+    Ok(StorageView { audio: state.cfg().audio, audio_bytes: sizes.iter().sum(), meetings_with_audio: sizes.iter().filter(|b| **b > 0).count() })
+}
+
+/// Change the audio policy: saved to config.toml and applied right away.
+#[tauri::command]
+fn set_audio_policy(state: State<AppState>, audio: fofoca_core::config::AudioConfig) -> CmdResult<StorageView> {
+    Config::save_audio(&config_path(), &audio).map_err(err)?;
+    state.cfg.write().unwrap().audio = audio;
+    fofoca_core::retention::apply(&state.store, &audio, chrono::Local::now().fixed_offset(), None, false).map_err(err)?;
+    storage(state)
+}
+
+/// Native file picker for an audio/video file to import (spec 012).
+#[tauri::command]
+async fn pick_recording(app: AppHandle) -> CmdResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("Import a recording")
+            .add_filter("Audio and video", &["mp3", "m4a", "aac", "ogg", "opus", "oga", "wav", "flac", "webm", "mp4", "mkv", "mov", "amr", "3gp"])
+            .blocking_pick_file()
+            .and_then(|f| f.into_path().ok())
+            .map(|p| p.display().to_string())
+    })
+    .await
+    .map_err(err)
+}
+
+/// Create a meeting for a recording made elsewhere and queue its processing (spec 012). Returns
+/// right away; progress arrives as `job` events.
+#[tauri::command]
+fn import_recording(state: State<AppState>, path: String, title: Option<String>, labels: Option<Vec<String>>) -> CmdResult<MeetingMeta> {
+    let src = std::path::PathBuf::from(&path);
+    let info = fofoca_core::import::probe(&src).map_err(err)?;
+    let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let meta = state
+        .store
+        .create(&StartInfo {
+            title: title.filter(|t| !t.trim().is_empty()).unwrap_or(stem),
+            labels: labels.unwrap_or_default(),
+            started_at: info.created_at,
+            imported_from: src.file_name().map(|n| n.to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+        .map_err(err)?;
+    state.jobs.import(meta.id.clone(), src);
+    Ok(meta)
+}
+
 #[tauri::command]
 fn active_session(state: State<AppState>) -> Option<MeetingMeta> {
     state.session.lock().unwrap().as_ref().map(|s| s.meeting.clone())
@@ -108,7 +247,7 @@ fn start_session(
     if let Some(uid) = calendar_uid.as_deref() {
         labels.extend(state.store.labels_for_series(uid).unwrap_or_default());
     }
-    let info = StartInfo { title, attendees: attendees.unwrap_or_default(), labels, calendar_uid };
+    let info = StartInfo { title, attendees: attendees.unwrap_or_default(), labels, calendar_uid, ..Default::default() };
     let mut slot = state.session.lock().unwrap();
     if slot.is_some() {
         return Err("a recording is already running".into());
@@ -117,11 +256,21 @@ fn start_session(
     let sink = Arc::new(move |e: SessionEvent| {
         if matches!(e, SessionEvent::Finished { .. } | SessionEvent::Discarded { .. }) {
             // The worker thread emits this as its last act; dropping the handle detaches it.
-            handle.state::<AppState>().session.lock().unwrap().take();
+            let state = handle.state::<AppState>();
+            state.session.lock().unwrap().take();
+            state.jobs.set_recording(false);
         }
         let _ = handle.emit("session", &e);
     });
-    let session = Session::start(state.cfg.clone(), state.store.clone(), &info, sink).map_err(err)?;
+    // imports give the GPU back while we record (spec 012)
+    state.jobs.set_recording(true);
+    let session = match Session::start(state.cfg(), state.store.clone(), &info, sink) {
+        Ok(s) => s,
+        Err(e) => {
+            state.jobs.set_recording(false);
+            return Err(err(e));
+        }
+    };
     let meta = session.meeting.clone();
     *slot = Some(session);
     Ok(meta)
@@ -271,11 +420,32 @@ fn with_series_labels(store: &Store, mut u: Upcoming) -> Upcoming {
 pub fn run() {
     let cfg = Config::load_or_create().expect("loading fo-foca config");
     let store = Store::new(cfg.meetings_dir()).expect("opening meetings folder");
+    {
+        // spec 011: apply the audio policy to past meetings, off the startup path
+        let (store, audio) = (store.clone(), cfg.audio);
+        std::thread::spawn(move || {
+            if let Err(e) = fofoca_core::retention::apply(&store, &audio, chrono::Local::now().fixed_offset(), None, false) {
+                eprintln!("audio retention: {e:#}");
+            }
+        });
+    }
     let calendars = Calendars::new(fofoca_core::config::calendars_path(), Keyring).expect("calendar client");
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .manage(AppState { cfg, store, session: Mutex::new(None), calendars, upcoming: Mutex::new(None) })
-        .setup(|app| {
+        .plugin(tauri_plugin_dialog::init())
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            let cfg_handle = handle.clone();
+            let jobs = fofoca_core::jobs::Jobs::start(
+                store.clone(),
+                Arc::new(move || cfg_handle.state::<AppState>().cfg()),
+                Arc::new(move |e| {
+                    let _ = handle.emit("job", &e);
+                }),
+            );
+            // Replay (spec 014): the webview may stream audio from the meetings folder — nothing else.
+            app.asset_protocol_scope().allow_directory(store.root(), true)?;
+            app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), calendars, upcoming: Mutex::new(None), jobs });
             // Embedded so the window has the seal icon even when no .desktop entry is installed
             // (X11/XWayland). GNOME on Wayland takes the icon from the desktop entry instead —
             // bundles ship one; for development see scripts/install-dev-desktop-entry.sh.
@@ -290,6 +460,16 @@ pub fn run() {
             known_labels,
             set_meeting_labels,
             get_meeting,
+            rename_speaker,
+            separate_speakers,
+            write_notes,
+            set_keep_audio,
+            delete_audio,
+            audio_tracks,
+            storage,
+            set_audio_policy,
+            pick_recording,
+            import_recording,
             active_session,
             start_session,
             summarize_now,

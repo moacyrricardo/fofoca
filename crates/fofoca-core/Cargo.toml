@@ -11,6 +11,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml = "0.8"
+toml_edit = "0.22"
 hound = "3.5"
 dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
@@ -18,6 +19,12 @@ rrule = "0.14"
 chrono-tz = "0.10"
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls"] }
+libc = "0.2"
+# Speaker separation (spec 003): ONNX Runtime (prebuilt, downloaded at build — no cmake) and a
+# pure-Rust Kaldi fbank, so no C++ toolchain is needed.
+ort = { version = "=2.0.0-rc.10", features = ["ndarray"] }
+ndarray = "0.16"
+kaldi-fbank = "0.3"
 
 [[bin]]
 name = "fofoca-cli"

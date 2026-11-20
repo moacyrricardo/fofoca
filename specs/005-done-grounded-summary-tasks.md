@@ -1,3 +1,6 @@
+Status: done
+Branch: moacyrricardo/spec-005-grounded-notes
+
 # 005 — Grounded final summary and task extraction
 
 > **Evidence:** [`001-assets/benchmarks-mx230.html`](001-assets/benchmarks-mx230.html) §5 — every
@@ -55,3 +58,41 @@ only trustworthy if every claim can be checked against what was said.
 ## Known Gaps
 
 - No write-back to task managers.
+
+## Implementation Notes
+
+- **Schema**: `summary`, `decisions`, `action_items` (owner/due nullable), each with 1–4 `refs`
+  (`mm:ss`). The separate `facts` list was dropped: numbers are checked inside every item's text
+  instead, which covers the same failure (invented figures) with a simpler schema for a 2B model.
+  Requested via `response_format: json_schema`; sampling temperature 0.2 for extraction.
+- **Validation** (`grounding.rs`, pure, unit-tested): refs resolve to a line starting within ±2 s;
+  numbers must appear in a cited line **or the line right before/after one** (measured: the model
+  cited "R$120 mil" at 00:34 for a point whose "R$87.500" is at 00:39). Number reading handles
+  `87.500`, `87,5 mil`, `R$87.500,00`, `1,234.5`, "cento e vinte mil", "oitenta e sete mil e
+  quinhentos", "dois mil e vinte e seis", safe ordinals (primeiro/terceiro). Owners match a speaker
+  display name or invitee (exact, or an unambiguous first name). Due dates are computed from the
+  cited words (explicit date, weekday → next one, hoje/amanhã); the model's date is used only for
+  "semana que vem"/"next week". Summary/decision items that repeat an action item are dropped.
+- **Eval** (`fofoca-cli eval-notes <wav> eval/ptbr-facts.json`, 75 s pt-BR recording, Qwen3.5-2B
+  on the MX230, same transcript):
+
+  | | numbers not in transcript | reference facts covered | time |
+  |---|---:|---:|---:|
+  | free-text summary | 1 ("28.75") | 9/9 | 28.8 s |
+  | grounded notes | 0 | 8/9 | 32.1 s |
+
+  Number checks don't catch reworded meaning: one kept point said the client "perdeu o contrato"
+  (not said). The time chips are the answer for that. An earlier run's free text also claimed
+  "cancelou o contrato" and a "-10.000" variance.
+- **Larger CPU model not evaluated**: no Qwen3.5-4B on this machine; the 2B extraction is the
+  default. Revisit if flagged/missed rates are high on real calls.
+- The final step still runs inside the session (it owns the LLM swap); `pipeline::mark_done` records
+  `notes` in `steps_done`. If extraction fails, the old free-text summary is written with a notice.
+  The notes are also stored as Markdown in `summaries.json` so older views keep working.
+- UI: Summary renders notes (time chips → Transcript tab, line highlighted), "Couldn't verify"
+  collapsed, Tasks tab with owner/due and the quoted line; "Write checked notes" button for
+  meetings without notes (Tauri `write_notes`, refused while recording). Checked in the browser
+  preview; not yet on a real call.
+- Found while measuring: a `whisper-server` orphaned since a recording the day before still held
+  813 MiB of VRAM (its app had died), which made llama-server OOM. Model servers don't die with
+  their parent — follow-up needed (e.g. `PR_SET_PDEATHSIG` on spawn).

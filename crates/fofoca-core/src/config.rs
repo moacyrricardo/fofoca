@@ -21,6 +21,54 @@ pub struct Config {
     pub meetings_dir: Option<PathBuf>,
     pub whisper: WhisperConfig,
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub diarization: DiarizationConfig,
+    #[serde(default)]
+    pub audio: AudioConfig,
+}
+
+/// How long meeting audio is kept (spec 011). Transcripts, notes and speakers are never deleted.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepAudio {
+    Always,
+    /// Delete once speaker separation and the notes step have both succeeded.
+    #[default]
+    AfterProcessing,
+    /// Delete `keep_days` after the meeting started.
+    Days,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioConfig {
+    pub keep: KeepAudio,
+    pub keep_days: u32,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        AudioConfig { keep: KeepAudio::AfterProcessing, keep_days: 30 }
+    }
+}
+
+/// Speaker separation after the call (spec 003). Runs on CPU.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DiarizationConfig {
+    pub segmentation_model: PathBuf,
+    pub embedding_model: PathBuf,
+    /// Cosine similarity above which two voices are the same person.
+    pub threshold: f32,
+}
+
+impl Default for DiarizationConfig {
+    fn default() -> Self {
+        let models = data_dir().join("models");
+        DiarizationConfig {
+            segmentation_model: models.join("segmentation-3.0.onnx"),
+            embedding_model: models.join("wespeaker_en_voxceleb_CAM++.onnx"),
+            threshold: 0.5,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -78,6 +126,8 @@ impl Default for Config {
                 context: 32768,
                 threads: 4,
             },
+            diarization: DiarizationConfig::default(),
+            audio: AudioConfig::default(),
         }
     }
 }
@@ -117,6 +167,22 @@ impl Config {
         }
         std::fs::write(path, toml::to_string_pretty(&cfg)?)?;
         Ok(cfg)
+    }
+
+    /// Change the `[audio]` table in the config file, keeping everything else (comments
+    /// included) as the user wrote it.
+    pub fn save_audio(path: &Path, audio: &AudioConfig) -> Result<()> {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let mut doc: toml_edit::DocumentMut = text.parse().with_context(|| format!("parsing {}", path.display()))?;
+        let keep = match audio.keep {
+            KeepAudio::Always => "always",
+            KeepAudio::AfterProcessing => "after_processing",
+            KeepAudio::Days => "days",
+        };
+        doc["audio"]["keep"] = toml_edit::value(keep);
+        doc["audio"]["keep_days"] = toml_edit::value(audio.keep_days as i64);
+        std::fs::write(path, doc.to_string()).with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
     }
 
     pub fn meetings_dir(&self) -> PathBuf {
@@ -174,6 +240,22 @@ mod tests {
         let read = Config::load_or_create_at(&path).unwrap();
         assert_eq!(read.llm.model, dirs::home_dir().unwrap().join("models/x.gguf"));
         assert_eq!(read.llm_name(), "x");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn saving_the_audio_policy_keeps_the_rest_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("fofoca-cfg-audio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        Config::load_or_create_at(&path).unwrap();
+        let text = format!("# my notes about this machine\n{}", std::fs::read_to_string(&path).unwrap());
+        std::fs::write(&path, text).unwrap();
+        Config::save_audio(&path, &AudioConfig { keep: KeepAudio::Days, keep_days: 7 }).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.starts_with("# my notes about this machine"), "{saved}");
+        let cfg = Config::load_or_create_at(&path).unwrap();
+        assert_eq!(cfg.audio, AudioConfig { keep: KeepAudio::Days, keep_days: 7 });
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

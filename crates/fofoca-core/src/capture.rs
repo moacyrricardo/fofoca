@@ -98,6 +98,7 @@ impl Capture {
             cmd.args(["-P", "{ stream.capture.sink=true }"]);
         }
         cmd.args(["--latency", "100ms", "-"]).stdout(Stdio::piped()).stderr(Stdio::null());
+        crate::proc::die_with_parent(&mut cmd);
         let mut child = cmd.spawn().context("starting pw-record (is PipeWire installed?)")?;
         let mut stdout = child.stdout.take().expect("piped stdout");
         let buffer = Arc::new(TrackBuffer::default());

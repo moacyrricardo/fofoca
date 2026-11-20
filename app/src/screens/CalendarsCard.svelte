@@ -106,14 +106,16 @@
 </div>
 
 <style>
-  .cal { margin-top: 16px; max-width: 900px; }
+  .cal { margin-top: 16px; }
   .between { justify-content: space-between; }
   h2 { margin: 0; }
   .small { font-size: 12.5px; }
   .link { background: none; border: 0; color: var(--teal); cursor: pointer; font-weight: 700; font-size: 13px; }
   .help { margin: 8px 0 6px; padding-left: 20px; line-height: 1.6; font-size: 13.5px; }
-  .src { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .src { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
   .src .txt { flex: 1; min-width: 0; }
+  .src > .dot { margin-top: 8px; } /* level with the calendar name, not the whole block */
+  .src > .btn { margin-top: 4px; }
   .deflabels { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
   .add { display: flex; gap: 10px; margin-top: 12px; }
   .add input { flex: 1; }

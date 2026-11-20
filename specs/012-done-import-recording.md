@@ -1,3 +1,6 @@
+Status: done
+Branch: moacyrricardo/spec-012-import-recording
+
 # 012 — Import a recording
 
 ## Context
@@ -48,3 +51,25 @@ building it as a UI feature first gives MCP a tested path to call.
 
 - Stereo files with one speaker per channel are mixed down; per-channel You/Call split is later.
 - Video files work (audio is extracted) but the video isn't kept.
+
+## Implementation Notes
+
+- Built as specified, with these differences:
+  - **No import dialog form**: the native picker opens and the import starts with the file name as
+    title and the file's creation time; title and labels are edited on the meeting page like any
+    other meeting (the Tauri command and the CLI accept `title`/`labels` already).
+  - **Pausing for a recording** happens at chunk boundaries during transcription (the job stops
+    its whisper-server and waits) and before loading the summary model. A recording started while
+    the import is *already generating notes* can briefly find the GPU full; the session then retries
+    loading Whisper on the next chunk (audio is buffered meanwhile). Acceptable for now.
+  - `MeetingMeta.imported_from` (file name) instead of a `source` enum; `StartInfo` gained
+    `started_at` and `imported_from`.
+  - The live session's final-summary code still lives in `session.rs`; the offline path uses the
+    new `pipeline::write_notes` / `transcribe_samples` / `run_import`. `eval-notes` now reuses
+    `transcribe_samples`.
+- **Verified end to end** with the real models: the 75 s pt-BR test recording converted to stereo
+  44.1 kHz Ogg, imported via `fofoca-cli import` into a scratch meetings folder → transcript,
+  speakers, checked notes; the audio was then deleted by the default after-processing policy.
+- Tests: ffprobe JSON parsing; ffmpeg conversion of a generated stereo 44.1 kHz tone (skipped when
+  ffmpeg or its ogg encoder is missing). The job queue and the in-app picker were checked in the
+  browser preview (fake backend), not yet in the running app.

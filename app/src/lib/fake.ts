@@ -1,6 +1,7 @@
 // Scripted stand-in for the Rust backend, used only outside Tauri (browser preview).
 
 import { normalizeLabels } from "./format";
+import type { JobEvent } from "./types";
 import type { CalendarEvent, CalendarSettings, ConfigView, Meeting, MeetingMeta, Segment, SessionEvent } from "./types";
 
 const LINES: [string, "you" | "call"][] = [
@@ -15,6 +16,10 @@ const LINES: [string, "you" | "call"][] = [
   ["Vou mandar o follow-up por e-mail ainda hoje, beleza? Se alguém tiver alguma dúvida, me dá um toque.", "you"],
 ];
 const segs: Segment[] = LINES.map(([text, track], i) => ({ start: i * 8, end: i * 8 + 7, text, track, words: [] }));
+// after speaker separation (spec 003): two voices on the call
+const VOICES = ["s1", "s1", "s2", "s1", "s2", "s1"];
+let callIdx = 0;
+const separated: Segment[] = segs.map((s) => ({ ...s, speaker: s.track === "you" ? "you" : VOICES[callIdx++ % VOICES.length] }));
 const FINAL = `**Resumo**
 O relatório do 3º trimestre de 2026 mostra indicadores abaixo das metas da diretoria. O cliente de Belo Horizonte prometeu fechar o contrato e parou de responder. A nova feature foi publicada na sexta, 15 de novembro, com feedback positivo.
 
@@ -27,7 +32,18 @@ O relatório do 3º trimestre de 2026 mostra indicadores abaixo das metas da dir
 - Enviar o follow-up por e-mail hoje.`;
 
 const meetings: Meeting[] = [
-  { meta: { id: "2026-11-19-140200", title: "Relatório Q3 — revisão com a diretoria", started_at: "2026-11-19T14:02:00-03:00", duration_s: 1104, finished: true, labels: ["trabalho", "diretoria"] }, segments: segs, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
+  { meta: { id: "2026-11-19-140200", title: "Relatório Q3 — revisão com a diretoria", started_at: "2026-11-19T14:02:00-03:00", duration_s: 1104, finished: true, labels: ["trabalho", "diretoria"], attendees: ["Rodrigo Lima", "Fernanda", "Ana"], steps_done: ["speakers"] }, speakers: { s1: { name: "Rodrigo Lima" }, s2: {} }, notes: {
+    summary: [
+      { text: "O relatório do 3º trimestre de 2026 mostra indicadores abaixo das expectativas da diretoria.", refs: [0, 8] },
+      { text: "O cliente de Belo Horizonte prometeu fechar o contrato e sumiu.", refs: [16, 24] },
+      { text: "Orçamento previsto de R$ 120 mil; executados R$ 87.500.", refs: [40] },
+      { text: "A nova feature foi publicada na sexta, 15 de novembro, com feedback positivo.", refs: [48, 56] },
+    ],
+    decisions: [],
+    action_items: [{ text: "Enviar o follow-up por e-mail", owner: "Você", due: "2026-11-19", refs: [64] }],
+    flagged: [{ section: "summary", text: "A diferença no orçamento foi de R$ 26.250.", reason: "26250 isn't said in the cited lines", refs: [40] }],
+    model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2,
+  }, segments: separated, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
   { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true, labels: ["trabalho", "1:1"], calendar_uid: "1" }, segments: segs.slice(0, 3), summaries: [] },
 ];
 
@@ -50,10 +66,17 @@ const events: CalendarEvent[] = [
 ];
 let calSettings: CalendarSettings = { sources: [{ id: "cal-1", kind: "link", label: "Trabalho", location: "calendar.google.com", default_labels: ["trabalho"] }], only_with_call_link: true, notify_before: true, auto_record: false };
 
+let audio: { keep: "always" | "after_processing" | "days"; keep_days: number } = { keep: "after_processing", keep_days: 30 };
 let listener: ((e: SessionEvent) => void) | null = null;
 let timers: number[] = [];
 let live: MeetingMeta | null = null;
 const emit = (e: SessionEvent) => listener?.(e);
+
+let jobListener: ((e: JobEvent) => void) | null = null;
+export function onJob(cb: (e: JobEvent) => void): () => void {
+  jobListener = cb;
+  return () => (jobListener = null);
+}
 
 export function onSession(cb: (e: SessionEvent) => void): () => void {
   listener = cb;
@@ -73,6 +96,44 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       const src = { id: `cal-${Date.now()}`, kind: "link" as const, label: "Pessoal", location: "calendar.google.com", default_labels: ["pessoal"] };
       calSettings = { ...calSettings, sources: [...calSettings.sources, src] };
       return src as T;
+    }
+    case "rename_speaker": {
+      const m = meetings.find((x) => x.meta.id === args?.id)!;
+      const name = String(args?.name ?? "").trim();
+      m.speakers = { ...m.speakers, [String(args?.speaker)]: { name: name || null } };
+      return structuredClone(m) as T;
+    }
+    case "pick_recording": return "/home/you/Gravações/reuniao-cliente-bh.m4a" as T;
+    case "import_recording": {
+      const id = `2026-11-20-0900${meetings.length}`;
+      const meta: MeetingMeta = { id, title: String(args?.title ?? "") || "reuniao-cliente-bh", started_at: "2026-11-20T09:00:00-03:00", duration_s: 0, finished: false, imported_from: "reuniao-cliente-bh.m4a", labels: normalizeLabels((args?.labels as string[]) ?? []) };
+      meetings.unshift({ meta, segments: [], summaries: [] });
+      const steps: [JobEvent["step"], number][] = [["converting", 0], ["transcribing", 0.1], ["transcribing", 0.4], ["transcribing", 0.8], ["speakers", 0], ["notes", 0], ["done", 1]];
+      steps.forEach(([step, progress], i) => window.setTimeout(() => {
+        if (step === "done") { const m = meetings.find((x) => x.meta.id === id)!; m.meta = { ...m.meta, finished: true, duration_s: 1920 }; m.segments = separated; m.speakers = { s1: {}, s2: {} }; }
+        jobListener?.({ meeting_id: id, step, progress });
+      }, 600 + i * 1100));
+      return meta as T;
+    }
+    case "storage": return { audio: audio, audio_bytes: 412_000_000, meetings_with_audio: 3 } as T;
+    case "set_audio_policy": audio = args?.audio as typeof audio; return { audio, audio_bytes: audio.keep === "always" ? 412_000_000 : 120_000_000, meetings_with_audio: audio.keep === "always" ? 3 : 1 } as T;
+    case "set_keep_audio": {
+      const m = meetings.find((x) => x.meta.id === args?.id)!;
+      m.meta = { ...m.meta, keep_audio: args?.keep ? true : null };
+      return structuredClone(m) as T;
+    }
+    case "delete_audio": {
+      const m = meetings.find((x) => x.meta.id === args?.id)!;
+      m.meta = { ...m.meta, audio_deleted_at: new Date().toISOString() };
+      return structuredClone(m) as T;
+    }
+    case "write_notes": {
+      const m = meetings.find((x) => x.meta.id === args?.id)!;
+      return new Promise((r) => setTimeout(() => r(structuredClone(m) as T), 1200));
+    }
+    case "separate_speakers": {
+      const m = meetings.find((x) => x.meta.id === args?.id)!;
+      return new Promise((r) => setTimeout(() => r(structuredClone(m) as T), 900));
     }
     case "list_meetings": return meetings.map((m) => m.meta).filter((m) => !args?.label || m.labels?.includes(String(args.label))) as T;
     case "known_labels": {
@@ -153,4 +214,35 @@ function startFake(title: string, labels: string[]): MeetingMeta {
   timers.push(window.setInterval(() => emit(status(0, "ready", "off")), 250));
   segs.forEach((s, i) => timers.push(window.setTimeout(() => emit({ type: "segment", segment: s }), 1500 + i * 1700)));
   return meta;
+}
+
+// Replay (spec 014): short generated tracks so the browser preview plays real sound — a hum with
+// syllable-like bursts wherever that track speaks (mic: one low voice; call: a pitch per voice).
+const audioCache = new Map<string, string>();
+function tone(segments: Segment[], pick: (s: Segment) => number | null): string {
+  const rate = 8000, secs = Math.ceil(Math.max(0, ...segments.map((s) => s.end))) + 2;
+  const n = rate * secs, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o: number, t: string) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, "data"); v.setUint32(40, n * 2, true);
+  for (const s of segments) {
+    const f = pick(s);
+    if (f === null) continue;
+    for (let i = Math.floor(s.start * rate); i < Math.min(n, Math.floor(s.end * rate)); i++) {
+      const t = i / rate, syllable = Math.max(0, Math.sin(Math.PI * 4 * (t - s.start)));
+      v.setInt16(44 + i * 2, Math.round(5000 * syllable * Math.sin(2 * Math.PI * f * t)), true);
+    }
+  }
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+
+export function audioTracks(id: string): { mic: string | null; call: string | null } {
+  const m = meetings.find((x) => x.meta.id === id);
+  if (!m || m.meta.audio_deleted_at || !m.meta.finished || !m.segments.length) return { mic: null, call: null };
+  const key = (t: string) => `${id}:${t}`;
+  const voice = (s: Segment) => (s.speaker && s.speaker !== "you" ? 260 + 90 * (parseInt(s.speaker.slice(1), 10) || 1) : 330);
+  if (!audioCache.has(key("call"))) audioCache.set(key("call"), tone(m.segments, (s) => (s.track === "call" ? voice(s) : null)));
+  if (!m.meta.imported_from && !audioCache.has(key("mic"))) audioCache.set(key("mic"), tone(m.segments, (s) => (s.track === "you" ? 196 : null)));
+  return { mic: m.meta.imported_from ? null : audioCache.get(key("mic"))!, call: audioCache.get(key("call"))! };
 }

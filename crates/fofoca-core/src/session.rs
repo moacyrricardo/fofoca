@@ -21,8 +21,10 @@ use std::time::{Duration, Instant};
 use crate::audio::{self, WavAppender, SAMPLE_RATE};
 use crate::capture::{Capture, CaptureStopper, Source, TrackBuffer};
 use crate::config::Config;
-use crate::llm::LlmClient;
+use crate::llm::{Completion, LlmClient};
+use crate::notes;
 use crate::model::{MeetingMeta, Pause, Segment, StartInfo, Summary, SummaryKind, Word};
+use crate::pipeline::{self, StepResult};
 use crate::prompts;
 use crate::servers::{Kind, ModelServer};
 use crate::store::Store;
@@ -127,6 +129,8 @@ impl Session {
             sys,
             asr: None,
             segments: Vec::new(),
+            speakers: Default::default(),
+            post_ok: true,
             offset_s: 0.0,
             pause_checked_at: 0,
         };
@@ -241,6 +245,10 @@ struct Worker {
     sys: Capture,
     asr: Option<(ModelServer, WhisperClient)>,
     segments: Vec<Segment>,
+    /// Every post-call step that needs the audio succeeded (spec 011).
+    post_ok: bool,
+    /// Named voices once speakers are separated (spec 003).
+    speakers: std::collections::BTreeMap<String, crate::model::SpeakerInfo>,
     /// Meeting time (s) at which the next chunk starts.
     offset_s: f64,
     /// Buffer length when we last looked for a pause to cut at (avoid rescanning every 100 ms).
@@ -269,9 +277,11 @@ impl Worker {
             return;
         }
         let duration = self.offset_s;
+        let processed = self.post_ok;
         match self.store.update_meta(&self.meeting.id, |m| {
             m.duration_s = duration;
             m.finished = true;
+            m.processed = processed;
         }) {
             Ok(m) => self.meeting = m,
             Err(_) => {
@@ -279,6 +289,17 @@ impl Worker {
                 self.meeting.finished = true;
                 let _ = self.store.save_meta(&self.meeting);
             }
+        }
+        // Spec 011: with "delete after processing", the audio goes now.
+        match crate::retention::apply(&self.store, &self.cfg.audio, chrono::Local::now().fixed_offset(), Some(&self.meeting.id), false) {
+            Ok(freed) if !freed.is_empty() => {
+                self.notice("Audio deleted after processing, as set in Settings — the transcript and notes are kept.");
+                if let Ok(m) = self.store.load(&self.meeting.id) {
+                    self.meeting = m.meta;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => self.error(format!("deleting audio: {e:#}")),
         }
         (self.emit)(SessionEvent::Finished { meeting: self.meeting.clone() });
     }
@@ -371,6 +392,29 @@ impl Worker {
 
         mic_wav.finish()?;
         sys_wav.finish()?;
+        // Whisper isn't needed any more; free the GPU before the CPU and summary steps.
+        self.asr = None;
+        self.set(Kind::Whisper, ModelState::Off);
+        if !self.segments.is_empty() {
+            (self.emit)(SessionEvent::Step { step: pipeline::STEP_SPEAKERS.into() });
+            match pipeline::separate_speakers(&self.store, &self.cfg, &self.meeting.id) {
+                Ok(StepResult::Done { .. }) => match self.store.load(&self.meeting.id) {
+                    Ok(m) => {
+                        self.segments = m.segments;
+                        self.speakers = m.speakers;
+                    }
+                    Err(e) => self.error(format!("reloading the transcript: {e:#}")),
+                },
+                Ok(StepResult::Skipped(msg)) => {
+                    self.post_ok = false;
+                    self.notice(&msg);
+                }
+                Err(e) => {
+                    self.post_ok = false;
+                    self.error(format!("speaker separation failed (the transcript is kept as is): {e:#}"));
+                }
+            }
+        }
         if !final_summary {
             // the user chose to stop without a summary
         } else if self.word_count() >= MIN_WORDS_TO_SUMMARIZE {
@@ -403,6 +447,7 @@ impl Worker {
             Ok(raw) => {
                 for r in raw {
                     let seg = Segment {
+                        speaker: None,
                         start: offset + r.start,
                         end: offset + r.end,
                         track: audio::attribute(mic, sys, r.start, r.end),
@@ -451,18 +496,46 @@ impl Worker {
         }
         self.set(Kind::Whisper, ModelState::Off);
         self.set(Kind::Llm, ModelState::Loading);
+        let mut grounded = None;
+        let mut fallback = None;
         let result = ModelServer::start(Kind::Llm, &self.cfg).and_then(|server| {
             self.set(Kind::Llm, ModelState::Busy);
-            let text = prompts::transcript_text(&self.segments, &self.cfg.language);
-            let prompt = match kind {
-                SummaryKind::Partial => prompts::partial(&text, &self.cfg.language),
-                SummaryKind::Final => prompts::final_summary(&text, &self.cfg.language),
+            let lang = self.cfg.language.as_str();
+            let client = LlmClient::new(&server.base_url)?;
+            let text = prompts::transcript_text(&self.segments, &self.speakers, lang);
+            let out = match kind {
+                SummaryKind::Partial => client.complete(&prompts::partial(&text, lang), 350),
+                // Spec 005: checked notes with citations; plain summary only if extraction fails.
+                SummaryKind::Final => match notes::extract(&client, &self.segments, &self.speakers, &self.meeting, &self.cfg) {
+                    Ok(n) => {
+                        let c = Completion { text: notes::to_markdown(&n, lang), gen_tokens_per_s: n.gen_tokens_per_s };
+                        grounded = Some(n);
+                        Ok(c)
+                    }
+                    Err(e) => {
+                        fallback = Some(format!("{e:#}"));
+                        client.complete(&prompts::final_summary(&text, lang), 700)
+                    }
+                },
             };
-            let out = LlmClient::new(&server.base_url)?.complete(&prompt, if kind == SummaryKind::Final { 700 } else { 350 });
             server.stop();
             out
         });
         self.set(Kind::Llm, ModelState::Off);
+        if let Some(n) = grounded {
+            match self.store.save_notes(&self.meeting.id, &n) {
+                Ok(()) => {
+                    let _ = pipeline::mark_done(&self.store, &self.meeting.id, pipeline::STEP_NOTES);
+                }
+                Err(e) => self.error(format!("saving notes: {e:#}")),
+            }
+        }
+        if kind == SummaryKind::Final && (fallback.is_some() || result.is_err()) {
+            self.post_ok = false;
+        }
+        if let Some(why) = fallback {
+            self.notice(&format!("Couldn't write checked notes ({why}); wrote a plain summary instead."));
+        }
         match result {
             Ok(c) => {
                 let summary = Summary {
