@@ -195,6 +195,17 @@ pub fn write_notes(store: &Store, cfg: &Config, id: &str) -> Result<()> {
     mark_done(store, id, STEP_NOTES)
 }
 
+/// Most voices speaker separation may find on the call track (spec 018). With ≥ 2 people on the
+/// calendar invite, everyone but the user: the user is on the mic track, not the call. With 0–1
+/// (imports, ad-hoc calls) there's nothing to go by, so allow a few.
+pub fn max_speakers(attendees: usize) -> usize {
+    if attendees >= 2 {
+        attendees - 1
+    } else {
+        (attendees + 1).max(4)
+    }
+}
+
 /// Separate the voices on the call track (CPU) and put them on the transcript. Re-running starts
 /// again from the base transcript (the per-track rebuild, else the live one); names already given
 /// to `s1`, `s2`, … are kept.
@@ -213,7 +224,7 @@ pub fn separate_speakers(store: &Store, cfg: &Config, id: &str) -> Result<StepRe
     let t0 = Instant::now();
     let samples = audio::read_wav(&wav)?;
     let meta = store.load(id)?.meta;
-    let opts = diarize::Options { threshold: dc.threshold, max_speakers: (meta.attendees.len() + 1).max(4) };
+    let opts = diarize::Options { threshold: dc.threshold, max_speakers: max_speakers(meta.attendees.len()) };
     let turns = diarize::separate(&samples, &dc.segmentation_model, &dc.embedding_model, &opts)?;
     let segments = speakers::assign(&store.base_transcript(id)?, &turns);
     let roster = speakers::roster(&segments, &store.speakers(id));
@@ -228,6 +239,14 @@ mod tests {
     use super::*;
     use crate::model::{Segment, StartInfo, Track};
     use crate::whisper::approx_words;
+
+    #[test]
+    fn speaker_cap_comes_from_the_invite() {
+        assert_eq!(max_speakers(2), 1, "you and one other person: one voice on the call");
+        assert_eq!(max_speakers(5), 4);
+        assert_eq!(max_speakers(1), 4, "no usable invite: as before");
+        assert_eq!(max_speakers(0), 4);
+    }
 
     fn no_hooks() -> (impl Fn(&str, f64), impl Fn() -> bool) {
         (|_: &str, _: f64| {}, || false)
