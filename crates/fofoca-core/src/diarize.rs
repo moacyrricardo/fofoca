@@ -252,6 +252,13 @@ mod tests {
         let opts1 = Options { threshold: 0.99, max_speakers: 2 };
         let labels = cluster(&[a, b, c], &opts1);
         assert_eq!(labels.iter().collect::<std::collections::HashSet<_>>().len(), 2);
+        // spec 018: a 2-person invite caps the call at one voice, even when two embeddings sit just
+        // under the threshold (the measured call found 3 "Persons" for one remote voice)
+        let (x, y) = (Some(vec![1.0, 0.0]), Some(vec![0.45, 0.893])); // cosine 0.45 < 0.5
+        let capped = Options { threshold: 0.5, max_speakers: crate::pipeline::max_speakers(2) };
+        assert_eq!(cluster(&[x.clone(), y.clone(), x.clone()], &capped), vec![1, 1, 1]);
+        let uncapped = Options { threshold: 0.5, max_speakers: crate::pipeline::max_speakers(0) };
+        assert_eq!(cluster(&[x.clone(), y, x], &uncapped), vec![1, 2, 1], "without the cap they stay apart");
         // nothing embedded: everyone is speaker 1
         assert_eq!(cluster(&[None, None], &opts), vec![1, 1]);
     }

@@ -126,7 +126,11 @@
         break;
       case "step":
         live.steps.push(e.step);
+        live.progress = null;
         if (screen === "live") screen = "processing";
+        break;
+      case "progress":
+        live.progress = { step: e.step, progress: e.progress };
         break;
       case "notice":
         live.summarizing = false;

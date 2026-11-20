@@ -7,8 +7,9 @@ use anyhow::{Context, Result};
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use crate::audio::{bytes_to_samples, rms};
 
@@ -25,6 +26,8 @@ pub struct TrackBuffer {
     level_bits: AtomicU32,
     /// While set (Pause, spec 010), captured audio is dropped; the level meter still moves.
     discard: AtomicBool,
+    /// When the first samples arrived (spec 018): the two captures don't start together.
+    first_sample_at: OnceLock<Instant>,
 }
 
 impl TrackBuffer {
@@ -42,10 +45,21 @@ impl TrackBuffer {
     }
     /// Append captured samples unless paused.
     pub fn push(&self, s: &[i16]) {
+        if !s.is_empty() {
+            self.first_sample_at.get_or_init(Instant::now);
+        }
         self.set_level(rms(s));
         if !self.discarding() {
             self.samples.lock().unwrap().extend_from_slice(s);
         }
+    }
+    pub fn first_sample_at(&self) -> Option<Instant> {
+        self.first_sample_at.get().copied()
+    }
+    /// Put `n` samples of silence before what's buffered (aligning a late-starting track).
+    pub fn pad_front(&self, n: usize) {
+        let mut s = self.samples.lock().unwrap();
+        s.splice(0..0, std::iter::repeat_n(0, n));
     }
     pub fn len(&self) -> usize {
         self.samples.lock().unwrap().len()
@@ -142,9 +156,43 @@ impl Drop for Capture {
     }
 }
 
+/// Which capture started later and by how many samples: its first sample arrived that much
+/// after the other's, so that much silence goes before it for both to start at t = 0 (spec 018).
+/// `None` until both have started, or when they started within one sample of each other.
+pub fn start_lag(mic: Option<Instant>, sys: Option<Instant>) -> Option<(Source, usize)> {
+    let (mic, sys) = (mic?, sys?);
+    let (late, by) = if sys > mic { (Source::SystemAudio, sys - mic) } else { (Source::Microphone, mic - sys) };
+    let n = (by.as_secs_f64() * crate::audio::SAMPLE_RATE as f64).round() as usize;
+    (n > 0).then_some((late, n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn the_later_track_gets_the_lag_as_silence() {
+        let t = Instant::now();
+        let ms = |n: u64| Some(t + Duration::from_millis(n));
+        // measured on this machine: the call's first sample ~85 ms after the mic's
+        assert!(matches!(start_lag(ms(0), ms(85)), Some((Source::SystemAudio, 1360))));
+        // the 10:38 call: system.wav 2.2 s longer, as if the mic had started late
+        assert!(matches!(start_lag(ms(2200), ms(0)), Some((Source::Microphone, 35200))));
+        assert!(start_lag(ms(0), None).is_none(), "wait until both started");
+        assert!(start_lag(ms(5), ms(5)).is_none());
+
+        let b = TrackBuffer::default();
+        assert!(b.first_sample_at().is_none());
+        b.push(&[]);
+        assert!(b.first_sample_at().is_none(), "no bytes yet");
+        b.push(&[7, 8]);
+        let first = b.first_sample_at().unwrap();
+        b.push(&[9]);
+        assert_eq!(b.first_sample_at(), Some(first), "only the first arrival counts");
+        b.pad_front(3);
+        assert_eq!(b.take(10), vec![0, 0, 0, 7, 8, 9]);
+    }
 
     #[test]
     fn paused_buffer_drops_audio_but_keeps_the_meter() {

@@ -94,6 +94,9 @@ pub struct Workflow {
     pub updates: Updates,
     /// Seconds between automatic summaries with `updates = "custom"`; 0 = only when asked.
     pub summary_every_s: u32,
+    /// After the call, transcribe each whole track again with the GPU free and replace the live
+    /// transcript (spec 018). Record-only always does this: it's the only transcription.
+    pub transcript_after: bool,
     pub speakers_after: bool,
     pub notes_after: bool,
     pub notes_device: Device,
@@ -108,6 +111,7 @@ impl Default for Workflow {
             live_device: Device::Gpu,
             updates: Updates::Balanced,
             summary_every_s: 300,
+            transcript_after: true,
             speakers_after: true,
             notes_after: true,
             notes_device: Device::Gpu,
@@ -490,17 +494,27 @@ mod tests {
         assert_eq!(cfg.pace(), Pace { min_chunk_s: 8, chunk_s: 30, summary_every_s: Some(300) });
         assert_eq!(cfg.live_devices(), (Device::Gpu, Device::Gpu));
 
-        let w = Workflow { live_summary: false, live_device: Device::Cpu, updates: Updates::Light, notes_device: Device::Cpu, ..Workflow::default() };
+        assert!(cfg.workflow.transcript_after, "the per-track rebuild is on unless turned off");
+        let w = Workflow { live_summary: false, live_device: Device::Cpu, updates: Updates::Light, transcript_after: false, notes_device: Device::Cpu, ..Workflow::default() };
         Config::save_workflow(&path, &w).unwrap();
         Config::save_path(&path, ModelSetting::Segmentation, Path::new("/m/seg.onnx")).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.starts_with("# keep me"), "{saved}");
         let cfg = Config::load_or_create_at(&path).unwrap();
         assert_eq!(cfg.workflow, w);
+        assert!(saved.contains("transcript_after = false"), "{saved}");
         assert_eq!(cfg.diarization.segmentation_model, PathBuf::from("/m/seg.onnx"));
         assert_eq!(cfg.pace().summary_every_s, None);
         assert_eq!(cfg.live_devices(), (Device::Cpu, Device::Cpu));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_015_workflow_table_gets_the_per_track_rebuild() {
+        // written by spec 015's Settings, before transcript_after existed
+        let w: Workflow = toml::from_str("live_transcript = true\nspeakers_after = false\nnotes_after = true\n").unwrap();
+        assert!(w.transcript_after);
+        assert!(!w.speakers_after);
     }
 
     #[test]

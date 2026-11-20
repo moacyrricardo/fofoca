@@ -7,6 +7,7 @@
 //!                     speakers.json    { "s1": SpeakerInfo, … } (spec 003)
 //!                     notes.json       grounded notes: summary, decisions, action items (spec 005)
 //!                     transcript.live.jsonl  the live transcript, kept when speakers are assigned
+//!                     transcript.base.jsonl  the per-track rebuild after the call (spec 018)
 //!                     mic.wav          microphone track
 //!                     system.wav       system-audio track
 //! ```
@@ -160,6 +161,29 @@ impl Store {
         std::fs::write(&tmp, body)?;
         std::fs::rename(&tmp, &path)?;
         Ok(())
+    }
+
+    /// Replace the transcript with one rebuilt from the audio, track by track (spec 018). It is
+    /// also kept as `transcript.base.jsonl`, the copy speaker separation starts from; the first
+    /// live transcript stays in `transcript.live.jsonl`.
+    pub fn rebuild_transcript(&self, id: &str, segments: &[Segment]) -> Result<()> {
+        self.replace_transcript(id, segments)?;
+        let dir = self.dir(id);
+        let tmp = dir.join("transcript.base.jsonl.tmp");
+        std::fs::copy(dir.join("transcript.jsonl"), &tmp)?;
+        std::fs::rename(&tmp, dir.join("transcript.base.jsonl"))?;
+        Ok(())
+    }
+
+    /// The transcript speaker separation starts from: the per-track rebuild when there is one
+    /// (spec 018), otherwise the live transcript.
+    pub fn base_transcript(&self, id: &str) -> Result<Vec<Segment>> {
+        let base = self.dir(id).join("transcript.base.jsonl");
+        if base.exists() {
+            read_jsonl(&base)
+        } else {
+            self.live_transcript(id)
+        }
     }
 
     /// The transcript as recorded live (before speaker assignment split any lines).
@@ -334,6 +358,38 @@ mod tests {
         assert_eq!(store.load(&meta.id).unwrap().speakers["s1"].name.as_deref(), Some("Fernanda"));
         assert!(store.rename_speaker(&meta.id, "s7", "x").is_err());
         assert_eq!(store.rename_speaker(&meta.id, "s1", "").unwrap()["s1"].name, None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn rebuilt_transcript_is_the_base_for_speakers() {
+        let root = std::env::temp_dir().join(format!("fofoca-store-base-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::new(&root).unwrap();
+        let meta = store.create(&StartInfo::default()).unwrap();
+        let line = |t: f64, track: Track, text: &str| Segment { start: t, end: t + 1.0, text: text.into(), track, words: vec![], speaker: None };
+        // live: one mixed line, labelled Call by the old loudness guess
+        store.append_segment(&meta.id, &line(0.0, Track::Call, "Oi, como vai?")).unwrap();
+        assert_eq!(store.base_transcript(&meta.id).unwrap().len(), 1, "no rebuild yet: the live one");
+
+        let rebuilt = vec![line(0.0, Track::Call, "Oi, como vai?"), line(2.0, Track::You, "tudo certo?")];
+        store.rebuild_transcript(&meta.id, &rebuilt).unwrap();
+        assert_eq!(store.load(&meta.id).unwrap().segments, rebuilt);
+        assert_eq!(store.base_transcript(&meta.id).unwrap(), rebuilt);
+        assert_eq!(store.live_transcript(&meta.id).unwrap().len(), 1, "the live copy is kept");
+
+        // speakers then split lines: the base stays the rebuild
+        let mut split = rebuilt.clone();
+        split[0].speaker = Some("s1".into());
+        split.push(line(5.0, Track::Call, "x"));
+        store.replace_transcript(&meta.id, &split).unwrap();
+        assert_eq!(store.base_transcript(&meta.id).unwrap(), rebuilt);
+
+        // record-only: no live transcript at all, the rebuild is the first one
+        let ro = store.create(&StartInfo { title: "ro".into(), ..Default::default() }).unwrap();
+        store.rebuild_transcript(&ro.id, &rebuilt).unwrap();
+        assert_eq!(store.base_transcript(&ro.id).unwrap(), rebuilt);
+        assert_eq!(store.load(&ro.id).unwrap().segments, rebuilt);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

@@ -61,7 +61,7 @@ const config: ConfigView = {
   llm_model: "Qwen3.5-2B-Q4_K_M",
   config: {
     language: "pt", chunk_seconds: 30, min_chunk_seconds: 8,
-    workflow: { live_transcript: true, live_summary: true, layout: "swap", live_device: "gpu", updates: "balanced", summary_every_s: 300, speakers_after: true, notes_after: true, notes_device: "gpu" },
+    workflow: { live_transcript: true, live_summary: true, layout: "swap", live_device: "gpu", updates: "balanced", summary_every_s: 300, transcript_after: true, speakers_after: true, notes_after: true, notes_device: "gpu" },
     whisper: { server: "~/.local/share/fofoca/bin/whisper/whisper-server", model: "~/.local/share/fofoca/models/ggml-large-v3-turbo-q5_0.bin", device: 0, threads: 4, vad_model: "~/.local/share/fofoca/models/ggml-silero-v5.1.2.bin" },
     llm: { server: "llama-server", model: "Qwen3.5-2B-Q4_K_M.gguf", device: "Vulkan1", context: 32768, threads: 4 },
   },
@@ -216,6 +216,13 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       emit({ type: "stopping" });
       timers.forEach(clearTimeout); timers = [];
       emit({ type: "step", step: "transcribing" });
+      { // spec 018: each track again after the call (always in record-only)
+        const wf = config.config.workflow!;
+        if (!wf.live_transcript || wf.transcript_after) {
+          emit({ type: "step", step: "transcript" });
+          [0.25, 0.5, 0.75].forEach((p, i) => timers.push(window.setTimeout(() => emit({ type: "progress", step: "transcript", progress: p }), 300 + i * 300)));
+        }
+      }
       timers.push(window.setTimeout(() => emit({ type: "step", step: "summarizing" }), 1500));
       timers.push(window.setTimeout(() => emit({ type: "summary", summary: meetings[0].summaries[0] }), 4500));
       timers.push(window.setTimeout(() => emit({ type: "step", step: "saving" }), 4700));

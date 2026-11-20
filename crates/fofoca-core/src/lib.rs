@@ -25,6 +25,7 @@ pub mod servers;
 pub mod session;
 pub mod speakers;
 pub mod store;
+pub mod tracks;
 pub mod whisper;
 
 pub use config::Config;

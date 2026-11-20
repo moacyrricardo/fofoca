@@ -4,8 +4,6 @@ use anyhow::{bail, Context, Result};
 use std::io::Cursor;
 use std::path::Path;
 
-use crate::model::Track;
-
 pub const SAMPLE_RATE: u32 = 16_000;
 
 /// Root-mean-square level of a block, in 0.0..=1.0.
@@ -15,36 +13,6 @@ pub fn rms(samples: &[i16]) -> f32 {
     }
     let sum: f64 = samples.iter().map(|&s| (s as f64 / i16::MAX as f64).powi(2)).sum();
     (sum / samples.len() as f64).sqrt() as f32
-}
-
-/// Mix two tracks into one, padding the shorter with silence.
-pub fn mix(a: &[i16], b: &[i16]) -> Vec<i16> {
-    let n = a.len().max(b.len());
-    (0..n)
-        .map(|i| {
-            let s = *a.get(i).unwrap_or(&0) as i32 + *b.get(i).unwrap_or(&0) as i32;
-            s.clamp(i16::MIN as i32, i16::MAX as i32) as i16
-        })
-        .collect()
-}
-
-/// Decide whether a time range (seconds, relative to the chunk) was spoken on the mic or the call.
-///
-/// The louder track over the range wins; the mic gets a small handicap because it also picks up
-/// the call from speakers when no headphones are used.
-pub fn attribute(mic: &[i16], sys: &[i16], start_s: f64, end_s: f64) -> Track {
-    let range = |v: &[i16]| {
-        let a = ((start_s.max(0.0) * SAMPLE_RATE as f64) as usize).min(v.len());
-        let b = ((end_s.max(start_s) * SAMPLE_RATE as f64) as usize).clamp(a, v.len());
-        rms(&v[a..b])
-    };
-    if range(mic) >= range(sys) * 1.2 {
-        Track::You
-    } else if range(sys) > 0.0 {
-        Track::Call
-    } else {
-        Track::You
-    }
 }
 
 /// Pick where to end a chunk: the quietest 100 ms frame within the last `search` samples before
@@ -107,6 +75,27 @@ pub fn pause_cut(a: &[i16], b: &[i16], min: usize, max: usize) -> Option<usize> 
         }
     }
     None
+}
+
+/// Whether one track holds any speech worth sending to Whisper (spec 018): at least 300 ms in
+/// total of 50 ms windows above the "quiet" level `pause_cut` uses — twice the buffer's noise
+/// floor (10th percentile of window levels), and at least 0.006.
+///
+/// Relative, because mic noise (0.003–0.015 RMS) overlaps quiet speech. A perfectly steady signal
+/// (a test tone, a hum) has no window above twice its own floor and counts as no speech; real
+/// speech always varies by more than that. Whisper's VAD still runs on what is sent; this only
+/// avoids sending silent tracks at all.
+pub fn has_speech(track: &[i16]) -> bool {
+    const WIN: usize = (SAMPLE_RATE / 20) as usize; // 50 ms
+    const MIN_WINDOWS: usize = 6; // 300 ms
+    let levels: Vec<f32> = track.chunks(WIN).filter(|w| w.len() == WIN).map(rms).collect();
+    if levels.len() < MIN_WINDOWS {
+        return false;
+    }
+    let mut sorted = levels.clone();
+    sorted.sort_by(|x, y| x.total_cmp(y));
+    let quiet = (sorted[sorted.len() / 10] * 2.0).max(0.006);
+    levels.iter().filter(|&&l| l > quiet).count() >= MIN_WINDOWS
 }
 
 /// Encode samples as an in-memory WAV file (for HTTP upload).
@@ -209,26 +198,6 @@ mod tests {
     }
 
     #[test]
-    fn mix_pads_and_clamps() {
-        let m = mix(&[i16::MAX, 1, 2], &[10]);
-        assert_eq!(m, vec![i16::MAX, 1, 2]);
-    }
-
-    #[test]
-    fn attribution_follows_the_louder_track() {
-        let sr = SAMPLE_RATE as usize;
-        // mic loud in the first second, call loud in the second
-        let mut mic = tone(sr, 8000);
-        mic.extend(tone(sr, 200));
-        let mut sys = tone(sr, 300);
-        sys.extend(tone(sr, 9000));
-        assert_eq!(attribute(&mic, &sys, 0.0, 1.0), Track::You);
-        assert_eq!(attribute(&mic, &sys, 1.0, 2.0), Track::Call);
-        // out-of-range timestamps don't panic
-        assert_eq!(attribute(&mic, &sys, 5.0, 9.0), Track::You);
-    }
-
-    #[test]
     fn quiet_cut_finds_the_pause() {
         let sr = SAMPLE_RATE as usize;
         // 10 s of speech with a 0.3 s pause at 8.5 s
@@ -261,6 +230,46 @@ mod tests {
         assert_eq!(pause_cut(&a, &b, 3 * sr, 30 * sr), None);
         // a buffer that is too short
         assert_eq!(pause_cut(&a[..3 * sr], &[], 3 * sr, 30 * sr), None);
+    }
+
+    /// "Speech" for the tests: 150 ms syllables with 100 ms gaps, so the level varies like a voice.
+    fn syllables(n: usize, amp: i16) -> Vec<i16> {
+        let (on, period) = (SAMPLE_RATE as usize * 15 / 100, SAMPLE_RATE as usize / 4);
+        (0..n).map(|i| if i % period < on { if i % 2 == 0 { amp } else { -amp } } else { 0 }).collect()
+    }
+
+    fn noise(n: usize, amp: i32) -> Vec<i16> {
+        (0..n).map(|i| (((i * 7919) % (2 * amp as usize + 1)) as i32 - amp) as i16).collect()
+    }
+
+    #[test]
+    fn has_speech_tells_voice_from_silence_and_noise() {
+        let sr = SAMPLE_RATE as usize;
+        assert!(has_speech(&syllables(5 * sr, 6000)), "syllables");
+        assert!(!has_speech(&[0; 16_000 * 5]), "digital silence");
+        assert!(!has_speech(&noise(5 * sr, 300)), "mic noise only (~0.005 RMS)");
+        assert!(!has_speech(&noise(5 * sr, 800)), "louder noise (~0.014 RMS) is still noise");
+        assert!(!has_speech(&tone(5 * sr, 6000)), "a steady tone is not speech");
+        assert!(!has_speech(&[]), "empty");
+        // quiet speech over the noise floor still counts
+        let mut quiet = noise(5 * sr, 300);
+        for (q, s) in quiet.iter_mut().zip(syllables(5 * sr, 900)) {
+            *q = q.saturating_add(s);
+        }
+        assert!(has_speech(&quiet), "quiet speech over mic noise");
+    }
+
+    #[test]
+    fn has_speech_needs_300_ms_of_voice() {
+        let sr = SAMPLE_RATE as usize;
+        let with_burst = |ms: usize| {
+            let mut v = noise(5 * sr, 300);
+            let (a, b) = (2 * sr, 2 * sr + ms * sr / 1000);
+            v[a..b].copy_from_slice(&tone(b - a, 6000));
+            v
+        };
+        assert!(!has_speech(&with_burst(200)), "a 200 ms click is not speech");
+        assert!(has_speech(&with_burst(400)), "400 ms of voice is");
     }
 
     #[test]

@@ -1,11 +1,14 @@
 //! A live recording session (spec 001; layouts, pacing and record-only from spec 015).
 //!
 //! ```text
-//! pw-record mic ─┐                      ┌─ mic.wav / system.wav
-//! pw-record sys ─┴─▶ 30 s chunks ─▶ mix ─▶ whisper-server (GPU) ─▶ segments (You/Call by energy)
+//! pw-record mic ─┐                ┌─ mic.wav / system.wav
+//! pw-record sys ─┴─▶ 30 s chunks ─┼─ mic ─▶ whisper-server (GPU) ─▶ You lines  ─┐ merge by time,
+//!                                 └─ sys ─▶ whisper-server (GPU) ─▶ Call lines ─┘ drop mic echoes
 //!                                                    ▲  swap (~3 s)
 //!                        "summary" ─▶ stop whisper ──┴─▶ llama-server (GPU) ─▶ summary ─▶ restart whisper
 //! ```
+//!
+//! Each track is transcribed on its own (spec 018), so a line's track is the file it came from.
 //!
 //! Capture never stops while models swap: audio piles up in the track buffers (the backlog) and
 //! is transcribed once Whisper is back. Other layouts (spec 015) run Whisper and/or the summary
@@ -25,11 +28,12 @@ use crate::capture::{Capture, CaptureStopper, Source, TrackBuffer};
 use crate::config::{Config, Device};
 use crate::llm::{Completion, LlmClient};
 use crate::notes;
-use crate::model::{MeetingMeta, Pause, Segment, StartInfo, Summary, SummaryKind, Word};
+use crate::model::{MeetingMeta, Pause, Segment, StartInfo, Summary, SummaryKind, Track};
 use crate::pipeline::{self, StepResult};
 use crate::prompts;
 use crate::servers::{Kind, ModelServer};
 use crate::store::Store;
+use crate::tracks;
 use crate::whisper::WhisperClient;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,8 +57,11 @@ pub enum SessionEvent {
     Segment { segment: Segment },
     /// Capture stopped; post-call work may still be queued behind model loading.
     Stopping,
-    /// A post-call step started: `transcribing`, `summarizing`, `saving`.
+    /// A post-call step started: `transcribing`, `transcript` (per-track rebuild, spec 018),
+    /// `speakers`, `summarizing`, `saving`.
     Step { step: String },
+    /// How far a long post-call step is, 0..=1 (the per-track rebuild).
+    Progress { step: String, progress: f64 },
     Summary { summary: Summary },
     Finished { meeting: MeetingMeta },
     /// The recording was thrown away: its folder (audio, transcript, summaries) is deleted.
@@ -140,6 +147,7 @@ impl Session {
             offset_s: 0.0,
             pause_checked_at: 0,
             last_summary_at: 0.0,
+            aligned: false,
         };
         let handle = std::thread::Builder::new().name("session".into()).spawn(move || {
             worker.run(rx);
@@ -266,6 +274,8 @@ struct Worker {
     pause_checked_at: usize,
     /// Meeting time of the last "summary so far" (for the automatic cadence, spec 015).
     last_summary_at: f64,
+    /// The later capture's start was padded so both tracks share t = 0 (spec 018).
+    aligned: bool,
 }
 
 impl Worker {
@@ -373,6 +383,9 @@ impl Worker {
                 }
             }
 
+            if !self.aligned {
+                self.align_tracks();
+            }
             let available = self.mic.buffer.len().min(self.sys.buffer.len());
             let n = if available >= chunk {
                 let (m, s) = (self.mic.buffer.peek(chunk), self.sys.buffer.peek(chunk));
@@ -390,6 +403,7 @@ impl Worker {
                 0
             };
             if n > 0 {
+                self.aligned = true; // too late to pad once audio has been written
                 let m = self.mic.buffer.take(n);
                 let s = self.sys.buffer.take(n);
                 mic_wav.append(&m)?;
@@ -421,8 +435,10 @@ impl Worker {
 
         mic_wav.finish()?;
         sys_wav.finish()?;
-        if !live {
-            self.transcribe_recording(chunk)?;
+        // Record-only has no transcript yet, so it always runs; after a live transcript it's the
+        // `transcript_after` step (spec 018).
+        if !live || self.cfg.workflow.transcript_after {
+            self.rebuild_transcript();
         }
         // Whisper isn't needed any more; free the GPU before the CPU and summary steps.
         self.asr = None;
@@ -461,31 +477,42 @@ impl Worker {
         Ok(Outcome::Finished)
     }
 
-    /// Record-only mode (spec 015): transcribe the saved tracks after the call, in the same
-    /// quiet-point chunks a live session uses, so You/Call attribution works the same way.
-    fn transcribe_recording(&mut self, chunk: usize) -> Result<()> {
-        let mic = audio::read_wav(&self.dir.join("mic.wav"))?;
-        let sys = audio::read_wav(&self.dir.join("system.wav"))?;
-        let total = mic.len().max(sys.len());
-        self.offset_s = 0.0;
-        let mut pos = 0;
-        while pos < total {
-            let (m, s) = (&mic[pos.min(mic.len())..], &sys[pos.min(sys.len())..]);
-            let (m, s) = (&m[..m.len().min(chunk + 1)], &s[..s.len().min(chunk + 1)]);
-            let n = audio::quiet_cut(m, s, chunk, 3 * SAMPLE_RATE as usize).max(1).min(total - pos);
-            self.transcribe_chunk(&m[..n.min(m.len())], &s[..n.min(s.len())]);
-            pos += n;
+    /// Transcribe each saved track on its own with the GPU free of live work and replace the live
+    /// transcript (spec 018) — also how record-only (spec 015) gets its transcript. Reuses the
+    /// live Whisper if it's loaded. A failure keeps the live transcript and the audio.
+    fn rebuild_transcript(&mut self) {
+        (self.emit)(SessionEvent::Step { step: pipeline::STEP_TRANSCRIPT.into() });
+        let emit = self.emit.clone();
+        let progress = move |step: &str, progress: f64| emit(SessionEvent::Progress { step: step.into(), progress });
+        let hooks = pipeline::Hooks { progress: &progress, yield_gpu: &|| false };
+        let mut asr = self.asr.take();
+        self.set(Kind::Whisper, ModelState::Busy);
+        let result = pipeline::retranscribe_with(&self.store, &self.cfg, &self.meeting.id, &hooks, &mut asr);
+        self.set(Kind::Whisper, if asr.is_some() { ModelState::Ready } else { ModelState::Off });
+        self.asr = asr;
+        match result {
+            Ok(pipeline::Rebuild::Done { .. }) => match self.store.load(&self.meeting.id) {
+                Ok(m) => self.segments = m.segments,
+                Err(e) => self.error(format!("reloading the transcript: {e:#}")),
+            },
+            Ok(pipeline::Rebuild::Skipped(msg)) => self.notice(&msg),
+            Err(e) => {
+                self.post_ok = false;
+                self.error(format!("transcribing each track failed (the live transcript is kept): {e:#}"));
+            }
         }
-        self.offset_s = total as f64 / SAMPLE_RATE as f64;
-        Ok(())
     }
 
+    /// Spec 018: each track with speech goes to Whisper on its own (mic first, then call, in the
+    /// same slot), so a line's track is the file it came from. Lines are merged by start time and
+    /// mic echoes of the call dropped before they're saved and shown.
     fn transcribe_chunk(&mut self, mic: &[i16], sys: &[i16]) {
         let len_s = mic.len().max(sys.len()) as f64 / SAMPLE_RATE as f64;
         let offset = self.offset_s;
         self.offset_s += len_s;
-        // Skip near-silent chunks: Whisper hallucinates on silence and it costs ~10 s of GPU.
-        if audio::rms(mic).max(audio::rms(sys)) < 0.003 {
+        // Silent tracks aren't sent: Whisper hallucinates on silence and each request costs GPU time.
+        let parts = tracks::with_speech(mic, sys);
+        if parts.is_empty() {
             return;
         }
         if self.asr.is_none() {
@@ -493,32 +520,40 @@ impl Worker {
         }
         let Some((_, client)) = &self.asr else { return };
         self.set(Kind::Whisper, ModelState::Busy);
+        // Both requests get the same prompt: the tail of the merged transcript.
         let prompt = tail_chars(&self.segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" "), 200);
-        let result = client.transcribe(audio::wav_bytes(&audio::mix(mic, sys)), &self.cfg.language, &prompt);
+        let out = tracks::transcribe_parts(&parts, offset, |s| client.transcribe(audio::wav_bytes(s), &self.cfg.language, &prompt));
         self.set(Kind::Whisper, ModelState::Ready);
-        match result {
-            Ok(raw) => {
-                for r in raw {
-                    let seg = Segment {
-                        speaker: None,
-                        start: offset + r.start,
-                        end: offset + r.end,
-                        track: audio::attribute(mic, sys, r.start, r.end),
-                        words: r
-                            .words
-                            .into_iter()
-                            .map(|w| Word { start: offset + w.start, end: offset + w.end, ..w })
-                            .collect(),
-                        text: r.text,
-                    };
-                    if let Err(e) = self.store.append_segment(&self.meeting.id, &seg) {
-                        self.error(format!("saving transcript: {e:#}"));
-                    }
-                    self.segments.push(seg.clone());
-                    (self.emit)(SessionEvent::Segment { segment: seg });
-                }
+        for (track, e) in &out.errors {
+            self.error(format!("transcription failed for {:.0}–{:.0} s ({}): {e:#}", offset, offset + len_s, track_name(*track)));
+        }
+        if out.echoes > 0 {
+            eprintln!("fofoca: {:.0}–{:.0} s: dropped {} mic line(s) echoing the call", offset, offset + len_s, out.echoes);
+        }
+        for seg in out.segments {
+            if let Err(e) = self.store.append_segment(&self.meeting.id, &seg) {
+                self.error(format!("saving transcript: {e:#}"));
             }
-            Err(e) => self.error(format!("transcription failed for {:.0}–{:.0} s: {e:#}", offset, offset + len_s)),
+            self.segments.push(seg.clone());
+            (self.emit)(SessionEvent::Segment { segment: seg });
+        }
+    }
+
+    /// Once both captures have delivered audio, pad the one that started later with that much
+    /// silence, so mic.wav and system.wav (and every chunk) start at the same moment (spec 018).
+    fn align_tracks(&mut self) {
+        let (mic, sys) = (&self.mic.buffer, &self.sys.buffer);
+        if mic.first_sample_at().is_none() || sys.first_sample_at().is_none() {
+            return;
+        }
+        self.aligned = true;
+        if let Some((late, n)) = crate::capture::start_lag(mic.first_sample_at(), sys.first_sample_at()) {
+            let (buffer, name) = match late {
+                Source::Microphone => (mic, "microphone"),
+                Source::SystemAudio => (sys, "call audio"),
+            };
+            buffer.pad_front(n);
+            eprintln!("fofoca: the {name} started {:.0} ms after the other track; padded its start", n as f64 * 1000.0 / SAMPLE_RATE as f64);
         }
     }
 
@@ -656,6 +691,13 @@ impl Worker {
 
     fn error(&self, message: String) {
         (self.emit)(SessionEvent::Error { message });
+    }
+}
+
+fn track_name(t: Track) -> &'static str {
+    match t {
+        Track::You => "microphone",
+        Track::Call => "call audio",
     }
 }
 

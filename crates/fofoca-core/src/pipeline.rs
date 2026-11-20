@@ -5,10 +5,14 @@ use anyhow::Result;
 use std::time::Instant;
 
 use crate::config::Config;
+use crate::model::{Segment, Track};
+use crate::servers::{Kind, ModelServer};
 use crate::store::Store;
-use crate::model::{Segment, Track, Word};
-use crate::{audio, diarize, speakers};
+use crate::whisper::WhisperClient;
+use crate::{audio, diarize, speakers, tracks};
 
+/// The per-track rebuild after the call (spec 018); runs before speakers and notes.
+pub const STEP_TRANSCRIPT: &str = "transcript";
 pub const STEP_SPEAKERS: &str = "speakers";
 pub const STEP_NOTES: &str = "notes";
 
@@ -47,46 +51,91 @@ impl Hooks<'_> {
     }
 }
 
+/// A loaded Whisper server and its client, handed between steps so it loads once.
+pub type Asr = Option<(ModelServer, WhisperClient)>;
+
 /// Transcribe a whole recording like a live session would (quiet-point chunks, VAD, prompt
-/// carry-over), on the Call track. Gives the GPU back between chunks if a recording starts.
-pub fn transcribe_samples(cfg: &Config, samples: &[i16], hooks: &Hooks) -> Result<Vec<Segment>> {
-    use crate::servers::{Kind, ModelServer};
-    use crate::whisper::WhisperClient;
+/// carry-over), as one `track`. Gives the GPU back between chunks if a recording starts.
+pub fn transcribe_samples(cfg: &Config, samples: &[i16], track: Track, hooks: &Hooks) -> Result<Vec<Segment>> {
+    transcribe_track(cfg, samples, track, hooks, &mut None, (STEP_TRANSCRIBE, 0.0, 1.0))
+}
+
+/// [`transcribe_samples`] with a Whisper server that may already be loaded (kept loaded for the
+/// next caller), reporting progress as `step` over `from..to`.
+fn transcribe_track(cfg: &Config, samples: &[i16], track: Track, hooks: &Hooks, asr: &mut Asr, (step, from, to): (&str, f64, f64)) -> Result<Vec<Segment>> {
     let sr = audio::SAMPLE_RATE as usize;
     let chunk = cfg.chunk_seconds as usize * sr;
     let (mut pos, mut prompt, mut out) = (0, String::new(), Vec::new());
-    let mut asr: Option<(ModelServer, WhisperClient)> = None;
     while pos < samples.len() {
         if (hooks.yield_gpu)() {
-            asr = None; // stops the server
+            *asr = None; // stops the server
             hooks.wait_for_gpu();
         }
-        if asr.is_none() {
-            let server = ModelServer::start(Kind::Whisper, cfg, cfg.live_devices().0)?;
-            let client = WhisperClient::new(&server.base_url)?;
-            asr = Some((server, client));
-        }
-        let Some((_, client)) = &asr else { unreachable!() };
-        (hooks.progress)(STEP_TRANSCRIBE, pos as f64 / samples.len() as f64);
+        (hooks.progress)(step, from + (to - from) * pos as f64 / samples.len() as f64);
         let rest = &samples[pos..];
         let n = audio::quiet_cut(&rest[..rest.len().min(chunk + 1)], &[], chunk, 3 * sr);
         let offset = pos as f64 / sr as f64;
-        if audio::rms(&rest[..n]) >= 0.003 {
+        // Silent stretches aren't sent (Whisper hallucinates on them; a quiet mic is mostly
+        // noise), and Whisper isn't even loaded until something is.
+        if audio::has_speech(&rest[..n]) {
+            if asr.is_none() {
+                let server = ModelServer::start(Kind::Whisper, cfg, cfg.live_devices().0)?;
+                let client = WhisperClient::new(&server.base_url)?;
+                *asr = Some((server, client));
+            }
+            let Some((_, client)) = &asr else { unreachable!() };
             for s in client.transcribe(audio::wav_bytes(&rest[..n]), &cfg.language, &prompt)? {
                 prompt = s.text.clone();
-                out.push(Segment {
-                    start: offset + s.start,
-                    end: offset + s.end,
-                    words: s.words.into_iter().map(|w| Word { start: offset + w.start, end: offset + w.end, ..w }).collect(),
-                    text: s.text,
-                    track: Track::Call,
-                    speaker: None,
-                });
+                out.push(tracks::segment(s, track, offset));
             }
         }
         pos += n;
     }
     Ok(out)
+}
+
+/// What the per-track rebuild did.
+#[derive(Debug, PartialEq)]
+pub enum Rebuild {
+    Done { lines: usize, echoes: usize, took_s: f64 },
+    /// Nothing rebuilt — the message says why; the transcript is left as it was.
+    Skipped(String),
+}
+
+/// Rebuild a meeting's transcript from its audio after the call (spec 018): transcribe each whole
+/// track on its own (mic = You, system audio = Call), merge by time, drop mic echoes, and replace
+/// the live transcript (kept as `transcript.live.jsonl`). Missing tracks are skipped; with no
+/// audio at all, nothing changes.
+pub fn retranscribe(store: &Store, cfg: &Config, id: &str, hooks: &Hooks) -> Result<Rebuild> {
+    retranscribe_with(store, cfg, id, hooks, &mut None)
+}
+
+/// [`retranscribe`] reusing a Whisper server the caller already has loaded (a live session).
+pub fn retranscribe_with(store: &Store, cfg: &Config, id: &str, hooks: &Hooks, asr: &mut Asr) -> Result<Rebuild> {
+    let t0 = Instant::now();
+    let dir = store.dir(id);
+    let read = |name: &str| -> Result<Vec<i16>> {
+        let p = dir.join(name);
+        if p.exists() { audio::read_wav(&p) } else { Ok(Vec::new()) }
+    };
+    let (mic, sys) = (read("mic.wav")?, read("system.wav")?);
+    let total = (mic.len() + sys.len()) as f64;
+    if total == 0.0 {
+        return Ok(Rebuild::Skipped("The transcript wasn't rebuilt per track: the audio is no longer stored.".into()));
+    }
+    let split = mic.len() as f64 / total;
+    let you = transcribe_track(cfg, &mic, Track::You, hooks, asr, (STEP_TRANSCRIPT, 0.0, split))?;
+    let call = transcribe_track(cfg, &sys, Track::Call, hooks, asr, (STEP_TRANSCRIPT, split, 1.0))?;
+    let (segments, echoes) = tracks::merge(you, call);
+    if segments.is_empty() && !store.live_transcript(id).unwrap_or_default().is_empty() {
+        return Ok(Rebuild::Skipped("The per-track transcript came out empty; the live transcript is kept.".into()));
+    }
+    store.rebuild_transcript(id, &segments)?;
+    mark_done(store, id, STEP_TRANSCRIPT)?;
+    if echoes > 0 {
+        eprintln!("fofoca: {id}: dropped {echoes} mic line(s) echoing the call");
+    }
+    Ok(Rebuild::Done { lines: segments.len(), echoes, took_s: t0.elapsed().as_secs_f64() })
 }
 
 /// Import a recording made elsewhere into meeting `id` (created by the caller): convert, transcribe,
@@ -98,7 +147,8 @@ pub fn run_import(store: &Store, cfg: &Config, id: &str, src: &std::path::Path, 
     crate::import::convert(src, &wav)?;
     let samples = audio::read_wav(&wav)?;
     let duration = samples.len() as f64 / audio::SAMPLE_RATE as f64;
-    let segments = transcribe_samples(cfg, &samples, hooks)?;
+    // one track only: everything in an imported file is "the call"
+    let segments = transcribe_samples(cfg, &samples, Track::Call, hooks)?;
     for s in &segments {
         store.append_segment(id, s)?;
     }
@@ -145,8 +195,20 @@ pub fn write_notes(store: &Store, cfg: &Config, id: &str) -> Result<()> {
     mark_done(store, id, STEP_NOTES)
 }
 
+/// Most voices speaker separation may find on the call track (spec 018). With ≥ 2 people on the
+/// calendar invite, everyone but the user: the user is on the mic track, not the call. With 0–1
+/// (imports, ad-hoc calls) there's nothing to go by, so allow a few.
+pub fn max_speakers(attendees: usize) -> usize {
+    if attendees >= 2 {
+        attendees - 1
+    } else {
+        (attendees + 1).max(4)
+    }
+}
+
 /// Separate the voices on the call track (CPU) and put them on the transcript. Re-running starts
-/// again from the live transcript; names already given to `s1`, `s2`, … are kept.
+/// again from the base transcript (the per-track rebuild, else the live one); names already given
+/// to `s1`, `s2`, … are kept.
 pub fn separate_speakers(store: &Store, cfg: &Config, id: &str) -> Result<StepResult> {
     let dc = &cfg.diarization;
     if !dc.segmentation_model.exists() || !dc.embedding_model.exists() {
@@ -162,9 +224,9 @@ pub fn separate_speakers(store: &Store, cfg: &Config, id: &str) -> Result<StepRe
     let t0 = Instant::now();
     let samples = audio::read_wav(&wav)?;
     let meta = store.load(id)?.meta;
-    let opts = diarize::Options { threshold: dc.threshold, max_speakers: (meta.attendees.len() + 1).max(4) };
+    let opts = diarize::Options { threshold: dc.threshold, max_speakers: max_speakers(meta.attendees.len()) };
     let turns = diarize::separate(&samples, &dc.segmentation_model, &dc.embedding_model, &opts)?;
-    let segments = speakers::assign(&store.live_transcript(id)?, &turns);
+    let segments = speakers::assign(&store.base_transcript(id)?, &turns);
     let roster = speakers::roster(&segments, &store.speakers(id));
     store.replace_transcript(id, &segments)?;
     store.save_speakers(id, &roster)?;
@@ -177,6 +239,114 @@ mod tests {
     use super::*;
     use crate::model::{Segment, StartInfo, Track};
     use crate::whisper::approx_words;
+
+    #[test]
+    fn speaker_cap_comes_from_the_invite() {
+        assert_eq!(max_speakers(2), 1, "you and one other person: one voice on the call");
+        assert_eq!(max_speakers(5), 4);
+        assert_eq!(max_speakers(1), 4, "no usable invite: as before");
+        assert_eq!(max_speakers(0), 4);
+    }
+
+    fn no_hooks() -> (impl Fn(&str, f64), impl Fn() -> bool) {
+        (|_: &str, _: f64| {}, || false)
+    }
+
+    fn write_wav(path: &std::path::Path, samples: &[i16]) {
+        let mut w = audio::WavAppender::create(path).unwrap();
+        w.append(samples).unwrap();
+        w.finish().unwrap();
+    }
+
+    #[test]
+    fn rebuild_without_audio_or_speech_never_fails_and_keeps_the_live_transcript() {
+        let root = std::env::temp_dir().join(format!("fofoca-rebuild-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::new(&root).unwrap();
+        let mut cfg = Config::default();
+        // never started: nothing below has speech
+        cfg.whisper.server = root.join("no-whisper-server");
+        let (progress, yield_gpu) = no_hooks();
+        let hooks = Hooks { progress: &progress, yield_gpu: &yield_gpu };
+        let live = Segment { start: 0.0, end: 1.0, text: "Oi".into(), track: Track::Call, words: vec![], speaker: None };
+
+        // audio deleted (retention, spec 011)
+        let gone = store.create(&StartInfo::default()).unwrap();
+        store.append_segment(&gone.id, &live).unwrap();
+        assert!(matches!(retranscribe(&store, &cfg, &gone.id, &hooks).unwrap(), Rebuild::Skipped(_)));
+        assert_eq!(store.load(&gone.id).unwrap().segments, vec![live.clone()]);
+
+        // only quiet noise on the mic and digital silence on the call: nothing comes out, and an
+        // empty rebuild doesn't wipe the live lines
+        let quiet = store.create(&StartInfo { title: "q".into(), ..Default::default() }).unwrap();
+        store.append_segment(&quiet.id, &live).unwrap();
+        let noise: Vec<i16> = (0..16_000 * 3).map(|i| ((i * 7919) % 301) as i16 - 150).collect();
+        write_wav(&store.dir(&quiet.id).join("mic.wav"), &noise);
+        write_wav(&store.dir(&quiet.id).join("system.wav"), &[0; 16_000 * 3]);
+        assert!(matches!(retranscribe(&store, &cfg, &quiet.id, &hooks).unwrap(), Rebuild::Skipped(_)));
+        assert_eq!(store.load(&quiet.id).unwrap().segments, vec![live]);
+        assert!(!store.load(&quiet.id).unwrap().meta.steps_done.contains(&STEP_TRANSCRIPT.to_string()));
+
+        // record-only with a missing mic track: the call track alone is used; silent → empty, done
+        let ro = store.create(&StartInfo { title: "ro".into(), ..Default::default() }).unwrap();
+        write_wav(&store.dir(&ro.id).join("system.wav"), &[0; 16_000 * 3]);
+        match retranscribe(&store, &cfg, &ro.id, &hooks).unwrap() {
+            Rebuild::Done { lines, echoes, .. } => assert_eq!((lines, echoes), (0, 0)),
+            r => panic!("{r:?}"),
+        }
+        assert!(store.load(&ro.id).unwrap().meta.steps_done.contains(&STEP_TRANSCRIPT.to_string()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Runs Whisper (spec 018): the per-track rebuild on a real mic + call pair, e.g. a recorded
+    /// meeting's `mic.wav` and `system.wav`.
+    /// `FOFOCA_MIC_WAV=<mic.wav> FOFOCA_CALL_WAV=<system.wav> cargo test -p fofoca-core -- --ignored per_track_rebuild --nocapture`
+    #[test]
+    #[ignore]
+    fn per_track_rebuild_on_a_real_recording() {
+        let (mic, call) = (std::env::var("FOFOCA_MIC_WAV").expect("set FOFOCA_MIC_WAV"), std::env::var("FOFOCA_CALL_WAV").expect("set FOFOCA_CALL_WAV"));
+        let root = std::env::temp_dir().join(format!("fofoca-rebuild-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::new(&root).unwrap();
+        let meta = store.create(&StartInfo { title: "per track".into(), ..Default::default() }).unwrap();
+        std::fs::copy(&mic, store.dir(&meta.id).join("mic.wav")).unwrap();
+        std::fs::copy(&call, store.dir(&meta.id).join("system.wav")).unwrap();
+        // a live transcript as the mixed path made it: one line, guessed as Call
+        let live = Segment { start: 0.0, end: 5.0, text: "linha ao vivo".into(), track: Track::Call, words: vec![], speaker: None };
+        store.append_segment(&meta.id, &live).unwrap();
+        let (progress, yield_gpu) = no_hooks();
+        let hooks = Hooks { progress: &progress, yield_gpu: &yield_gpu };
+        let r = retranscribe(&store, &Config::default(), &meta.id, &hooks).unwrap();
+        eprintln!("{r:?}");
+        let m = store.load(&meta.id).unwrap();
+        let (mic_s, call_s) = (audio::read_wav(mic.as_ref()).unwrap(), audio::read_wav(call.as_ref()).unwrap());
+        let level = |v: &[i16], s: &Segment| {
+            let (a, b) = ((s.start * 16_000.0) as usize, (s.end * 16_000.0) as usize);
+            audio::rms(&v[a.min(v.len())..b.min(v.len())])
+        };
+        let span = |v: &[i16], s: &Segment| v[((s.start * 16_000.0) as usize).min(v.len())..((s.end * 16_000.0) as usize).min(v.len())].to_vec();
+        let (mut louder, mut voiced) = (0, 0);
+        for s in &m.segments {
+            let (own, other) = match s.track {
+                Track::You => (&mic_s, &call_s),
+                Track::Call => (&call_s, &mic_s),
+            };
+            let (lo, lt) = (level(own, s), level(other, s));
+            louder += usize::from(lo > lt);
+            voiced += usize::from(audio::has_speech(&span(own, s)));
+            eprintln!("{:6.1}-{:6.1} {:?} own {lo:.3} other {lt:.3}  {}", s.start, s.end, s.track, s.text);
+        }
+        // A line can span several of one person's turns (VAD drops the other person's turns from
+        // each track), so "louder over the whole line" is only a diagnostic.
+        eprintln!("{louder}/{} lines louder on their own track", m.segments.len());
+        assert!(m.segments.iter().any(|s| s.track == Track::You) && m.segments.iter().any(|s| s.track == Track::Call), "both tracks speak");
+        assert!(m.segments.windows(2).all(|w| w[0].start <= w[1].start), "merged by time");
+        assert_eq!(voiced, m.segments.len(), "every line has speech on its own track where it says it is");
+        assert_eq!(store.live_transcript(&meta.id).unwrap(), vec![live], "live copy kept");
+        assert_eq!(store.base_transcript(&meta.id).unwrap(), m.segments);
+        assert!(m.meta.steps_done.contains(&STEP_TRANSCRIPT.to_string()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     /// Runs the real models. `FOFOCA_DIAR_WAV=<16 kHz mono wav> cargo test -- --ignored speakers_step`
     /// (pyannote-rs' public `6_speakers.wav` works); models from the default config paths.
