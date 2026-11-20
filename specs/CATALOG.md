@@ -18,4 +18,4 @@
 | 014 | done   | replay                      | moacyrricardo/spec-014-replay           | —     | mock in 014-assets; needs audio kept (011) |
 | 015 | done   | models-workflow             | moacyrricardo/spec-015-models-workflow  | —     | mock in 015-assets; global settings, tabs |
 | 016 | done   | tasks-view                  | moacyrricardo/spec-016-tasks-view       | —     | filtered by meeting labels; no per-task labels |
-| 017 | doing  | tray-and-icon               | moacyrricardo/spec-017-tray-and-icon-build | —     | icon without white corners; tray start/stop + show/hide |
+| 017 | done   | tray-and-icon               | moacyrricardo/spec-017-tray-and-icon-build | —     | icon without white corners; tray start/stop + show/hide |
