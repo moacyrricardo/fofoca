@@ -1,7 +1,7 @@
 <script lang="ts">
   // Settings → Processing (spec 015): what runs during and after a call, and where.
   import type { Device, Layout, Updates, Workflow, WorkflowView } from "../lib/types";
-  import { LAYOUTS, UPDATES, afterSteps, fmt, peakMib, unavailable } from "../lib/workflow";
+  import { LAYOUTS, UPDATES, afterSteps, fmt, peakMib, transcriptDevice, unavailable } from "../lib/workflow";
   import { shortModel } from "../lib/format";
 
   let { view, onchange, ongomodels }: { view: WorkflowView; onchange: (w: Workflow) => void; ongomodels: () => void } = $props();
@@ -94,7 +94,10 @@
     <h2>After the call</h2>
     <div class="steps">
       {#if !w.live_transcript}
-        <div class="step"><input type="checkbox" checked disabled /><span>Transcribe the recording <span class="faint">— live transcript is off, so this runs when you stop</span></span><span class="chip {w.live_device}">{w.live_device.toUpperCase()}</span></div>
+        <div class="step"><input type="checkbox" checked disabled /><span>Transcribe each track <span class="faint">— live transcript is off, so this runs when you stop</span></span><span class="chip {transcriptDevice(w)}">{transcriptDevice(w).toUpperCase()}</span></div>
+      {:else}
+        <label class="step"><input type="checkbox" checked={w.transcript_after} onchange={(e) => set({ transcript_after: (e.target as HTMLInputElement).checked })} />
+          <span>Re-transcribe each track <span class="faint">— you and the call separately, once the call is over; replaces the live text</span></span><span class="chip {transcriptDevice(w)}">{transcriptDevice(w).toUpperCase()}</span></label>
       {/if}
       <label class="step"><input type="checkbox" checked={w.speakers_after} onchange={(e) => set({ speakers_after: (e.target as HTMLInputElement).checked })} />
         <span>Separate speakers <span class="faint">— names each voice on the call; 40 s of audio took 1.2 s</span></span><span class="chip cpu">CPU</span></label>

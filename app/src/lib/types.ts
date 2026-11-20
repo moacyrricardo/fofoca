@@ -27,7 +27,8 @@ export type SessionEvent =
   | { type: "paused"; at_s: number }
   | { type: "resumed"; at_s: number }
   | { type: "stopping" }
-  | { type: "step"; step: "transcribing" | "summarizing" | "saving" }
+  | { type: "step"; step: "transcribing" | "transcript" | "speakers" | "summarizing" | "saving" }
+  | { type: "progress"; step: string; progress: number }
   | { type: "summary"; summary: Summary }
   | { type: "finished"; meeting: MeetingMeta }
   | { type: "discarded"; meeting_id: string }
@@ -57,7 +58,7 @@ export type Layout = "swap" | "gpu_transcript" | "gpu_summary" | "cpu" | "gpu_bo
 export type Updates = "fast" | "balanced" | "light" | "custom";
 export interface Workflow {
   live_transcript: boolean; live_summary: boolean; layout: Layout; live_device: Device; updates: Updates;
-  summary_every_s: number; speakers_after: boolean; notes_after: boolean; notes_device: Device;
+  summary_every_s: number; transcript_after: boolean; speakers_after: boolean; notes_after: boolean; notes_device: Device;
 }
 export interface Gpu { device: string; name: string; total_mib: number; free_mib: number }
 export interface Footprint { mib: number; measured: boolean }

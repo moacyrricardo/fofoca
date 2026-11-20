@@ -6,6 +6,7 @@
 
   const STEPS = [
     { id: "transcribing", title: "Finish transcription", detail: "last chunk · Whisper on the GPU", chip: "GPU" },
+    { id: "transcript", title: "Transcribing each track", detail: "you and the call separately, the whole recording", chip: "GPU" },
     { id: "speakers", title: "Separate speakers", detail: "who said what on the call · runs on the processor", chip: "CPU" },
     { id: "summarizing", title: "Write checked notes", detail: "summary, decisions and tasks — each checked against what was said", chip: "GPU" },
     { id: "saving", title: "Save notes", detail: "transcript, summary and both audio tracks stay on this computer", chip: "disk" },
@@ -28,7 +29,7 @@
       {@const st = state(s.id)}
       <div class="step {st}">
         <span class="st">{st === "done" ? "✓" : ""}</span>
-        <div><b>{s.title}</b><div class="d">{s.detail}</div></div>
+        <div><b>{s.title}</b>{#if st === "run" && live.progress?.step === s.id}<span class="pct"> · {Math.round(live.progress.progress * 100)}%</span>{/if}<div class="d">{s.detail}</div></div>
         <span class="chip" class:gpu={s.chip === "GPU"}>{s.chip}</span>
       </div>
     {/each}
@@ -50,4 +51,5 @@
   .step.run .st { border-top-color: var(--teal); animation: sp .8s linear infinite; }
   .step.todo { opacity: .6; }
   .d { font-size: 12.5px; color: var(--ink-3); }
+  .pct { font-size: 12.5px; color: var(--ink-2); font-weight: 700; }
 </style>

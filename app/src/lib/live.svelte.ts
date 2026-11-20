@@ -14,6 +14,8 @@ export const live = $state({
   summarizing: false,
   stopping: false,
   steps: [] as string[],
+  /** How far the running post-call step is, 0..1 (the per-track rebuild, spec 018). */
+  progress: null as { step: string; progress: number } | null,
 });
 
 export function resetLive(meeting: MeetingMeta | null) {
@@ -26,4 +28,5 @@ export function resetLive(meeting: MeetingMeta | null) {
   live.summarizing = false;
   live.stopping = false;
   live.steps = [];
+  live.progress = null;
 }
