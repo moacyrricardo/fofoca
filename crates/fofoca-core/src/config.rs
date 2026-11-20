@@ -21,6 +21,28 @@ pub struct Config {
     pub meetings_dir: Option<PathBuf>,
     pub whisper: WhisperConfig,
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub diarization: DiarizationConfig,
+}
+
+/// Speaker separation after the call (spec 003). Runs on CPU.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DiarizationConfig {
+    pub segmentation_model: PathBuf,
+    pub embedding_model: PathBuf,
+    /// Cosine similarity above which two voices are the same person.
+    pub threshold: f32,
+}
+
+impl Default for DiarizationConfig {
+    fn default() -> Self {
+        let models = data_dir().join("models");
+        DiarizationConfig {
+            segmentation_model: models.join("segmentation-3.0.onnx"),
+            embedding_model: models.join("wespeaker_en_voxceleb_CAM++.onnx"),
+            threshold: 0.5,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -78,6 +100,7 @@ impl Default for Config {
                 context: 32768,
                 threads: 4,
             },
+            diarization: DiarizationConfig::default(),
         }
     }
 }

@@ -6,12 +6,15 @@ pub mod audio;
 pub mod calendar;
 pub mod capture;
 pub mod config;
+pub mod diarize;
 pub mod labels;
 pub mod llm;
 pub mod model;
+pub mod pipeline;
 pub mod prompts;
 pub mod servers;
 pub mod session;
+pub mod speakers;
 pub mod store;
 pub mod whisper;
 

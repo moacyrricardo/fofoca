@@ -23,6 +23,7 @@ use crate::capture::{Capture, CaptureStopper, Source, TrackBuffer};
 use crate::config::Config;
 use crate::llm::LlmClient;
 use crate::model::{MeetingMeta, Pause, Segment, StartInfo, Summary, SummaryKind, Word};
+use crate::pipeline::{self, StepResult};
 use crate::prompts;
 use crate::servers::{Kind, ModelServer};
 use crate::store::Store;
@@ -127,6 +128,7 @@ impl Session {
             sys,
             asr: None,
             segments: Vec::new(),
+            speakers: Default::default(),
             offset_s: 0.0,
             pause_checked_at: 0,
         };
@@ -241,6 +243,8 @@ struct Worker {
     sys: Capture,
     asr: Option<(ModelServer, WhisperClient)>,
     segments: Vec<Segment>,
+    /// Named voices once speakers are separated (spec 003).
+    speakers: std::collections::BTreeMap<String, crate::model::SpeakerInfo>,
     /// Meeting time (s) at which the next chunk starts.
     offset_s: f64,
     /// Buffer length when we last looked for a pause to cut at (avoid rescanning every 100 ms).
@@ -371,6 +375,23 @@ impl Worker {
 
         mic_wav.finish()?;
         sys_wav.finish()?;
+        // Whisper isn't needed any more; free the GPU before the CPU and summary steps.
+        self.asr = None;
+        self.set(Kind::Whisper, ModelState::Off);
+        if !self.segments.is_empty() {
+            (self.emit)(SessionEvent::Step { step: pipeline::STEP_SPEAKERS.into() });
+            match pipeline::separate_speakers(&self.store, &self.cfg, &self.meeting.id) {
+                Ok(StepResult::Done { .. }) => match self.store.load(&self.meeting.id) {
+                    Ok(m) => {
+                        self.segments = m.segments;
+                        self.speakers = m.speakers;
+                    }
+                    Err(e) => self.error(format!("reloading the transcript: {e:#}")),
+                },
+                Ok(StepResult::Skipped(msg)) => self.notice(&msg),
+                Err(e) => self.error(format!("speaker separation failed (the transcript is kept as is): {e:#}")),
+            }
+        }
         if !final_summary {
             // the user chose to stop without a summary
         } else if self.word_count() >= MIN_WORDS_TO_SUMMARIZE {
@@ -403,6 +424,7 @@ impl Worker {
             Ok(raw) => {
                 for r in raw {
                     let seg = Segment {
+                        speaker: None,
                         start: offset + r.start,
                         end: offset + r.end,
                         track: audio::attribute(mic, sys, r.start, r.end),
@@ -453,7 +475,7 @@ impl Worker {
         self.set(Kind::Llm, ModelState::Loading);
         let result = ModelServer::start(Kind::Llm, &self.cfg).and_then(|server| {
             self.set(Kind::Llm, ModelState::Busy);
-            let text = prompts::transcript_text(&self.segments, &self.cfg.language);
+            let text = prompts::transcript_text(&self.segments, &self.speakers, &self.cfg.language);
             let prompt = match kind {
                 SummaryKind::Partial => prompts::partial(&text, &self.cfg.language),
                 SummaryKind::Final => prompts::final_summary(&text, &self.cfg.language),

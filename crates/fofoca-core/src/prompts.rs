@@ -1,19 +1,16 @@
 //! Prompts for the summary model. The grounded, structured version is spec 005.
 
-use crate::model::{Segment, Track};
+use std::collections::BTreeMap;
 
-/// Render the transcript as `[mm:ss] Speaker: text` lines.
-pub fn transcript_text(segments: &[Segment], language: &str) -> String {
-    let (you, call) = if language == "pt" { ("Você", "Chamada") } else { ("You", "Call") };
+use crate::model::{Segment, SpeakerInfo};
+use crate::speakers::display_name;
+
+/// Render the transcript as `[mm:ss] Speaker: text` lines, with speaker names once voices have
+/// been separated (spec 003), else You / Call.
+pub fn transcript_text(segments: &[Segment], speakers: &BTreeMap<String, SpeakerInfo>, language: &str) -> String {
     segments
         .iter()
-        .map(|s| {
-            let who = match s.track {
-                Track::You => you,
-                Track::Call => call,
-            };
-            format!("[{}] {}: {}", mmss(s.start), who, s.text)
-        })
+        .map(|s| format!("[{}] {}: {}", mmss(s.start), display_name(s, speakers, language), s.text))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -61,14 +58,20 @@ pub fn mmss(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Track;
 
     #[test]
     fn renders_speakers_and_times() {
         let segs = vec![
-            Segment { start: 0.0, end: 2.0, text: "Oi".into(), track: Track::You, words: vec![] },
-            Segment { start: 65.4, end: 70.0, text: "Tudo bem".into(), track: Track::Call, words: vec![] },
+            Segment { start: 0.0, end: 2.0, text: "Oi".into(), track: Track::You, words: vec![], speaker: None },
+            Segment { start: 65.4, end: 70.0, text: "Tudo bem".into(), track: Track::Call, words: vec![], speaker: None },
         ];
-        assert_eq!(transcript_text(&segs, "pt"), "[00:00] Você: Oi\n[01:05] Chamada: Tudo bem");
+        assert_eq!(transcript_text(&segs, &BTreeMap::new(), "pt"), "[00:00] Você: Oi\n[01:05] Chamada: Tudo bem");
+        let mut named = segs.clone();
+        named[1].speaker = Some("s1".into());
+        let mut sp = BTreeMap::new();
+        sp.insert("s1".to_string(), SpeakerInfo { name: Some("Ana".into()) });
+        assert_eq!(transcript_text(&named, &sp, "pt"), "[00:00] Você: Oi\n[01:05] Ana: Tudo bem");
         assert!(partial("x", "en").contains("so far"));
     }
 }

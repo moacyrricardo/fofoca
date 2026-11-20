@@ -4,6 +4,8 @@
 //! <meetings_dir>/<id>/meta.json        MeetingMeta
 //!                     transcript.jsonl one Segment per line, appended live
 //!                     summaries.json   Vec<Summary>
+//!                     speakers.json    { "s1": SpeakerInfo, … } (spec 003)
+//!                     transcript.live.jsonl  the live transcript, kept when speakers are assigned
 //!                     mic.wav          microphone track
 //!                     system.wav       system-audio track
 //! ```
@@ -14,7 +16,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::labels;
-use crate::model::{Meeting, MeetingMeta, Segment, StartInfo, Summary};
+use crate::model::{Meeting, MeetingMeta, Segment, SpeakerInfo, StartInfo, Summary};
+use std::collections::BTreeMap;
 
 /// Serializes read-modify-write of meta.json files (UI commands and the session worker run on
 /// different threads).
@@ -61,6 +64,7 @@ impl Store {
             labels: labels::normalize_all(&info.labels),
             calendar_uid: info.calendar_uid.clone().filter(|u| !u.is_empty()),
             pauses: Vec::new(),
+            steps_done: Vec::new(),
         };
         self.save_meta(&meta)?;
         Ok(meta)
@@ -111,6 +115,54 @@ impl Store {
         Ok(())
     }
 
+    /// Replace the whole transcript (atomically). The first time, the live transcript is kept as
+    /// `transcript.live.jsonl` so speaker assignment can be redone from it.
+    pub fn replace_transcript(&self, id: &str, segments: &[Segment]) -> Result<()> {
+        let dir = self.dir(id);
+        let (path, live) = (dir.join("transcript.jsonl"), dir.join("transcript.live.jsonl"));
+        if path.exists() && !live.exists() {
+            std::fs::copy(&path, &live)?;
+        }
+        let tmp = dir.join("transcript.jsonl.tmp");
+        let mut body = String::new();
+        for s in segments {
+            body.push_str(&serde_json::to_string(s)?);
+            body.push('\n');
+        }
+        std::fs::write(&tmp, body)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    /// The transcript as recorded live (before speaker assignment split any lines).
+    pub fn live_transcript(&self, id: &str) -> Result<Vec<Segment>> {
+        let live = self.dir(id).join("transcript.live.jsonl");
+        if live.exists() {
+            read_jsonl(&live)
+        } else {
+            read_jsonl(&self.dir(id).join("transcript.jsonl"))
+        }
+    }
+
+    pub fn speakers(&self, id: &str) -> BTreeMap<String, SpeakerInfo> {
+        read_json(&self.dir(id).join("speakers.json")).unwrap_or_default()
+    }
+
+    pub fn save_speakers(&self, id: &str, speakers: &BTreeMap<String, SpeakerInfo>) -> Result<()> {
+        write_json(&self.dir(id).join("speakers.json"), speakers)
+    }
+
+    /// Name a voice; an empty name goes back to "Person N".
+    pub fn rename_speaker(&self, id: &str, key: &str, name: &str) -> Result<BTreeMap<String, SpeakerInfo>> {
+        let _w = META_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.speakers(id);
+        let s = all.get_mut(key).with_context(|| format!("no speaker {key} in meeting {id}"))?;
+        let name = name.trim();
+        s.name = (!name.is_empty()).then(|| name.to_string());
+        self.save_speakers(id, &all)?;
+        Ok(all)
+    }
+
     pub fn add_summary(&self, id: &str, summary: &Summary) -> Result<()> {
         let path = self.dir(id).join("summaries.json");
         let mut all: Vec<Summary> = read_json(&path).unwrap_or_default();
@@ -121,17 +173,10 @@ impl Store {
     pub fn load(&self, id: &str) -> Result<Meeting> {
         let dir = self.dir(id);
         let meta: MeetingMeta = read_json(&dir.join("meta.json"))?;
-        let mut segments = Vec::new();
-        if let Ok(f) = std::fs::File::open(dir.join("transcript.jsonl")) {
-            for line in BufReader::new(f).lines() {
-                let line = line?;
-                if !line.trim().is_empty() {
-                    segments.push(serde_json::from_str(&line)?);
-                }
-            }
-        }
+        let path = dir.join("transcript.jsonl");
+        let segments = if path.exists() { read_jsonl(&path)? } else { Vec::new() };
         let summaries = read_json(&dir.join("summaries.json")).unwrap_or_default();
-        Ok(Meeting { meta, segments, summaries })
+        Ok(Meeting { meta, segments, summaries, speakers: self.speakers(id) })
     }
 
     /// All meetings (or only those carrying `label`), newest first. Folders without a readable
@@ -155,6 +200,17 @@ fn write_json<T: serde::Serialize>(path: &Path, v: &T) -> Result<()> {
     Ok(())
 }
 
+fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    for line in BufReader::new(std::fs::File::open(path)?).lines() {
+        let line = line?;
+        if !line.trim().is_empty() {
+            out.push(serde_json::from_str(&line)?);
+        }
+    }
+    Ok(out)
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
@@ -170,7 +226,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let store = Store::new(&root).unwrap();
         let mut meta = store.create(&StartInfo { title: "Sync".into(), attendees: vec!["Rodrigo".into()], ..Default::default() }).unwrap();
-        let seg = Segment { start: 0.0, end: 1.0, text: "Oi".into(), track: Track::You, words: vec![] };
+        let seg = Segment { start: 0.0, end: 1.0, text: "Oi".into(), track: Track::You, words: vec![], speaker: None };
         store.append_segment(&meta.id, &seg).unwrap();
         store.append_segment(&meta.id, &seg).unwrap();
         store
@@ -200,6 +256,20 @@ mod tests {
         assert!(store.list(Some("nope")).unwrap().is_empty());
         assert_eq!(store.known_labels().unwrap(), vec![("trabalho".to_string(), 2), ("cliente-bh".to_string(), 1)]);
         assert!(store.set_labels("missing", &["x"]).is_err());
+
+        // speakers: replacing the transcript keeps the live copy; names round-trip
+        let mut split = seg.clone();
+        split.speaker = Some("s1".into());
+        store.replace_transcript(&meta.id, &[split.clone(), split.clone(), split]).unwrap();
+        assert_eq!(store.load(&meta.id).unwrap().segments.len(), 3);
+        assert_eq!(store.live_transcript(&meta.id).unwrap().len(), 2, "live copy kept");
+        let mut sp = BTreeMap::new();
+        sp.insert("s1".to_string(), SpeakerInfo::default());
+        store.save_speakers(&meta.id, &sp).unwrap();
+        store.rename_speaker(&meta.id, "s1", "  Fernanda ").unwrap();
+        assert_eq!(store.load(&meta.id).unwrap().speakers["s1"].name.as_deref(), Some("Fernanda"));
+        assert!(store.rename_speaker(&meta.id, "s7", "x").is_err());
+        assert_eq!(store.rename_speaker(&meta.id, "s1", "").unwrap()["s1"].name, None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

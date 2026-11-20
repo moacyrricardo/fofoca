@@ -8,6 +8,8 @@
 //!                                           chunker; print per-line latency, backlog and WER
 //! fofoca-cli record --seconds N [--title T] [--label L]… [--summary-at S] [--no-summary | --discard]
 //! fofoca-cli summarize <meeting-id>         write a final summary for a stored meeting
+//! fofoca-cli diarize <meeting-id>           (re-)run speaker separation on the call track
+//! fofoca-cli diarize-wav <file.wav> [--threshold T] [--max N]   print speaker turns of a WAV
 //! fofoca-cli list [--label L]               list stored meetings (optionally only those labelled L)
 //! fofoca-cli labels                         known labels with meeting counts
 //! fofoca-cli label <meeting-id> add|rm <label>
@@ -45,6 +47,8 @@ fn run() -> Result<()> {
         }
         Some("transcribe") => transcribe(&cfg, args.get(1).context("usage: transcribe <file.wav>")?),
         Some("bench-latency") => bench_latency(&cfg, &args[1..]),
+        Some("diarize-wav") => diarize_wav(&cfg, &args[1..]),
+        Some("diarize") => diarize_meeting(&cfg, &store, args.get(1).context("usage: diarize <meeting-id>")?),
         Some("record") => record(cfg, store, &args[1..]),
         Some("summarize") => summarize(&cfg, &store, args.get(1).context("usage: summarize <meeting-id>")?),
         Some("calendar") => calendar(&args[1..]),
@@ -93,6 +97,40 @@ fn transcribe(cfg: &Config, path: &str) -> Result<()> {
     let audio_s = samples.len() as f64 / SAMPLE_RATE as f64;
     let took = t1.elapsed().as_secs_f64();
     eprintln!("transcribed {audio_s:.1}s of audio in {took:.1}s ({:.2}x real time)", took / audio_s);
+    Ok(())
+}
+
+/// (Re-)run speaker separation for a stored meeting and print the named transcript.
+fn diarize_meeting(cfg: &Config, store: &Store, id: &str) -> Result<()> {
+    match fofoca_core::pipeline::separate_speakers(store, cfg, id)? {
+        fofoca_core::pipeline::StepResult::Done { speakers, took_s } => {
+            let m = store.load(id)?;
+            println!("{}", prompts::transcript_text(&m.segments, &m.speakers, &cfg.language));
+            eprintln!("{speakers} voices on the call, {took_s:.1}s");
+        }
+        fofoca_core::pipeline::StepResult::Skipped(msg) => eprintln!("{msg}"),
+    }
+    Ok(())
+}
+
+/// Run speaker separation on a 16 kHz mono WAV and print the turns (for tuning, spec 003).
+fn diarize_wav(cfg: &Config, args: &[String]) -> Result<()> {
+    let path = args.first().context("usage: diarize-wav <file.wav> [--threshold T] [--max N]")?;
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let opts = fofoca_core::diarize::Options {
+        threshold: flag("--threshold").map(|s| s.parse()).transpose()?.unwrap_or(cfg.diarization.threshold),
+        max_speakers: flag("--max").map(|s| s.parse()).transpose()?.unwrap_or(8),
+    };
+    let samples = audio::read_wav(path.as_ref())?;
+    let t0 = Instant::now();
+    let turns = fofoca_core::diarize::separate(&samples, &cfg.diarization.segmentation_model, &cfg.diarization.embedding_model, &opts)?;
+    let took = t0.elapsed().as_secs_f64();
+    for t in &turns {
+        println!("{:7.2} – {:7.2}  speaker {}", t.start, t.end, t.speaker);
+    }
+    let speakers: std::collections::BTreeSet<_> = turns.iter().map(|t| t.speaker).collect();
+    let audio_s = samples.len() as f64 / SAMPLE_RATE as f64;
+    eprintln!("{} turns, {} speakers, {took:.1}s for {audio_s:.1}s of audio ({:.3}x)", turns.len(), speakers.len(), took / audio_s);
     Ok(())
 }
 
@@ -240,7 +278,7 @@ fn summarize(cfg: &Config, store: &Store, id: &str) -> Result<()> {
     let t0 = Instant::now();
     let server = ModelServer::start(Kind::Llm, cfg)?;
     eprintln!("llm loaded in {:.1}s", t0.elapsed().as_secs_f64());
-    let text = prompts::transcript_text(&meeting.segments, &cfg.language);
+    let text = prompts::transcript_text(&meeting.segments, &meeting.speakers, &cfg.language);
     let c = LlmClient::new(&server.base_url)?.complete(&prompts::final_summary(&text, &cfg.language), 700)?;
     println!("{}", c.text);
     store.add_summary(

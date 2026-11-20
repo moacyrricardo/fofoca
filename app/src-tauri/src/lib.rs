@@ -89,6 +89,30 @@ fn get_meeting(state: State<AppState>, id: String) -> CmdResult<Meeting> {
     state.store.load(&id).map_err(err)
 }
 
+/// Name a voice on the call (spec 003); an empty name goes back to "Person N".
+#[tauri::command]
+fn rename_speaker(state: State<AppState>, id: String, speaker: String, name: String) -> CmdResult<Meeting> {
+    state.store.rename_speaker(&id, &speaker, &name).map_err(err)?;
+    state.store.load(&id).map_err(err)
+}
+
+/// (Re-)run speaker separation on a stored meeting. CPU-bound, so it runs on a blocking thread.
+#[tauri::command]
+async fn separate_speakers(app: AppHandle, id: String) -> CmdResult<Meeting> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if state.session.lock().unwrap().as_ref().is_some_and(|s| s.meeting.id == id) {
+            return Err("this meeting is still being recorded".to_string());
+        }
+        match fofoca_core::pipeline::separate_speakers(&state.store, &state.cfg, &id).map_err(err)? {
+            fofoca_core::pipeline::StepResult::Done { .. } => state.store.load(&id).map_err(err),
+            fofoca_core::pipeline::StepResult::Skipped(msg) => Err(msg),
+        }
+    })
+    .await
+    .map_err(err)?
+}
+
 #[tauri::command]
 fn active_session(state: State<AppState>) -> Option<MeetingMeta> {
     state.session.lock().unwrap().as_ref().map(|s| s.meeting.clone())
@@ -290,6 +314,8 @@ pub fn run() {
             known_labels,
             set_meeting_labels,
             get_meeting,
+            rename_speaker,
+            separate_speakers,
             active_session,
             start_session,
             summarize_now,

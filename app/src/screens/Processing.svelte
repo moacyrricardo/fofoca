@@ -6,6 +6,7 @@
 
   const STEPS = [
     { id: "transcribing", title: "Finish transcription", detail: "last chunk · Whisper on the GPU", chip: "GPU" },
+    { id: "speakers", title: "Separate speakers", detail: "who said what on the call · runs on the processor", chip: "CPU" },
     { id: "summarizing", title: "Write final summary", detail: "swap Whisper out, load the summary model on the GPU", chip: "GPU" },
     { id: "saving", title: "Save notes", detail: "transcript, summary and both audio tracks stay on this computer", chip: "disk" },
   ];

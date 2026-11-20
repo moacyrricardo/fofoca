@@ -15,6 +15,10 @@ const LINES: [string, "you" | "call"][] = [
   ["Vou mandar o follow-up por e-mail ainda hoje, beleza? Se alguém tiver alguma dúvida, me dá um toque.", "you"],
 ];
 const segs: Segment[] = LINES.map(([text, track], i) => ({ start: i * 8, end: i * 8 + 7, text, track, words: [] }));
+// after speaker separation (spec 003): two voices on the call
+const VOICES = ["s1", "s1", "s2", "s1", "s2", "s1"];
+let callIdx = 0;
+const separated: Segment[] = segs.map((s) => ({ ...s, speaker: s.track === "you" ? "you" : VOICES[callIdx++ % VOICES.length] }));
 const FINAL = `**Resumo**
 O relatório do 3º trimestre de 2026 mostra indicadores abaixo das metas da diretoria. O cliente de Belo Horizonte prometeu fechar o contrato e parou de responder. A nova feature foi publicada na sexta, 15 de novembro, com feedback positivo.
 
@@ -27,7 +31,7 @@ O relatório do 3º trimestre de 2026 mostra indicadores abaixo das metas da dir
 - Enviar o follow-up por e-mail hoje.`;
 
 const meetings: Meeting[] = [
-  { meta: { id: "2026-11-19-140200", title: "Relatório Q3 — revisão com a diretoria", started_at: "2026-11-19T14:02:00-03:00", duration_s: 1104, finished: true, labels: ["trabalho", "diretoria"] }, segments: segs, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
+  { meta: { id: "2026-11-19-140200", title: "Relatório Q3 — revisão com a diretoria", started_at: "2026-11-19T14:02:00-03:00", duration_s: 1104, finished: true, labels: ["trabalho", "diretoria"], attendees: ["Rodrigo Lima", "Fernanda", "Ana"], steps_done: ["speakers"] }, speakers: { s1: { name: "Rodrigo Lima" }, s2: {} }, segments: separated, summaries: [{ kind: "final", at_s: 72, text: FINAL, model: "Qwen3.5-2B-Q4_K_M", gen_tokens_per_s: 17.2 }] },
   { meta: { id: "2026-11-18-103000", title: "1:1 Fernanda", started_at: "2026-11-18T10:30:00-03:00", duration_s: 1920, finished: true, labels: ["trabalho", "1:1"], calendar_uid: "1" }, segments: segs.slice(0, 3), summaries: [] },
 ];
 
@@ -73,6 +77,16 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       const src = { id: `cal-${Date.now()}`, kind: "link" as const, label: "Pessoal", location: "calendar.google.com", default_labels: ["pessoal"] };
       calSettings = { ...calSettings, sources: [...calSettings.sources, src] };
       return src as T;
+    }
+    case "rename_speaker": {
+      const m = meetings.find((x) => x.meta.id === args?.id)!;
+      const name = String(args?.name ?? "").trim();
+      m.speakers = { ...m.speakers, [String(args?.speaker)]: { name: name || null } };
+      return structuredClone(m) as T;
+    }
+    case "separate_speakers": {
+      const m = meetings.find((x) => x.meta.id === args?.id)!;
+      return new Promise((r) => setTimeout(() => r(structuredClone(m) as T), 900));
     }
     case "list_meetings": return meetings.map((m) => m.meta).filter((m) => !args?.label || m.labels?.includes(String(args.label))) as T;
     case "known_labels": {

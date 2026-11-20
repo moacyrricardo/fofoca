@@ -31,6 +31,18 @@ pub struct Segment {
     pub track: Track,
     #[serde(default)]
     pub words: Vec<Word>,
+    /// After speaker separation (spec 003): `"you"` for the mic, `"s1"`, `"s2"`, … for voices on
+    /// the call. `None` before separation or when no voice could be matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+}
+
+/// A voice found on the call (`speakers.json`, keyed by `s1`, `s2`, …).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SpeakerInfo {
+    /// Name given by the user; shown instead of "Person N".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +89,9 @@ pub struct MeetingMeta {
     /// continuous: `at_s` is the meeting time where the pause sits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pauses: Vec<Pause>,
+    /// Post-call steps that finished (`"speakers"`, …), so a failed step can be retried alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps_done: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -103,4 +118,6 @@ pub struct Meeting {
     pub meta: MeetingMeta,
     pub segments: Vec<Segment>,
     pub summaries: Vec<Summary>,
+    #[serde(default)]
+    pub speakers: std::collections::BTreeMap<String, SpeakerInfo>,
 }
