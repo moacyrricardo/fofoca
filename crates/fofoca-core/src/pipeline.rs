@@ -162,7 +162,7 @@ pub fn separate_speakers(store: &Store, cfg: &Config, id: &str) -> Result<StepRe
     let t0 = Instant::now();
     let samples = audio::read_wav(&wav)?;
     let meta = store.load(id)?.meta;
-    let opts = diarize::Options { threshold: dc.threshold, max_speakers: (meta.attendees.len() + 1).max(4) };
+    let opts = diarize::Options { threshold: dc.threshold, max_speakers: max_speakers(meta.attendees.len()) };
     let turns = diarize::separate(&samples, &dc.segmentation_model, &dc.embedding_model, &opts)?;
     let segments = speakers::assign(&store.live_transcript(id)?, &turns);
     let roster = speakers::roster(&segments, &store.speakers(id));
@@ -172,8 +172,28 @@ pub fn separate_speakers(store: &Store, cfg: &Config, id: &str) -> Result<StepRe
     Ok(StepResult::Done { speakers: roster.len(), took_s: t0.elapsed().as_secs_f64() })
 }
 
+/// Most voices speaker separation may find on the call track. With a calendar invite of N ≥ 2
+/// attendees the call side has N − 1 (the user is one of them, and their voice is on the mic
+/// track); without one, allow a few.
+pub fn max_speakers(attendees: usize) -> usize {
+    if attendees >= 2 {
+        attendees - 1
+    } else {
+        (attendees + 1).max(4)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invite_caps_call_side_speakers() {
+        use super::max_speakers;
+        assert_eq!(max_speakers(2), 1, "a 1:1 call has one voice on the call track");
+        assert_eq!(max_speakers(5), 4);
+        assert_eq!(max_speakers(0), 4, "no invite: allow a few");
+        assert_eq!(max_speakers(1), 4, "only one attendee known: allow a few");
+    }
+
     use super::*;
     use crate::model::{Segment, StartInfo, Track};
     use crate::whisper::approx_words;
