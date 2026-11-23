@@ -319,6 +319,7 @@ fn eval_notes(cfg: &Config, args: &[String]) -> Result<()> {
         id: "eval".into(),
         title: "eval".into(),
         started_at: chrono::Local::now().to_rfc3339(),
+        transcript_source: None,
         duration_s: 0.0,
         finished: true,
         attendees: vec!["Rodrigo".into(), "Fernanda".into()],

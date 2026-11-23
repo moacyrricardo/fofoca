@@ -6,6 +6,10 @@ use std::path::Path;
 
 use crate::model::Track;
 
+mod speech;
+pub use speech::*;
+const FRAME: usize = (SAMPLE_RATE / 10) as usize;
+
 pub const SAMPLE_RATE: u32 = 16_000;
 
 /// Root-mean-square level of a block, in 0.0..=1.0.
@@ -51,7 +55,6 @@ pub fn attribute(mic: &[i16], sys: &[i16], start_s: f64, end_s: f64) -> Track {
 /// `target`, so a fixed cut doesn't split a word (measured: "deu ghost" → "de Augusto" at a hard
 /// 30 s cut). Returns the cut index (≤ `target`). Both tracks count — the louder one decides.
 pub fn quiet_cut(a: &[i16], b: &[i16], target: usize, search: usize) -> usize {
-    const FRAME: usize = (SAMPLE_RATE / 10) as usize;
     let len = a.len().max(b.len());
     if len <= target {
         return len;

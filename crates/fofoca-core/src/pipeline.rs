@@ -9,6 +9,9 @@ use crate::store::Store;
 use crate::model::{Segment, Track, Word};
 use crate::{audio, diarize, speakers};
 
+mod tracks;
+pub use tracks::*;
+
 pub const STEP_SPEAKERS: &str = "speakers";
 pub const STEP_NOTES: &str = "notes";
 
@@ -164,7 +167,7 @@ pub fn separate_speakers(store: &Store, cfg: &Config, id: &str) -> Result<StepRe
     let meta = store.load(id)?.meta;
     let opts = diarize::Options { threshold: dc.threshold, max_speakers: (meta.attendees.len() + 1).max(4) };
     let turns = diarize::separate(&samples, &dc.segmentation_model, &dc.embedding_model, &opts)?;
-    let segments = speakers::assign(&store.live_transcript(id)?, &turns);
+    let segments = speakers::assign(&store.base_transcript(id)?, &turns);
     let roster = speakers::roster(&segments, &store.speakers(id));
     store.replace_transcript(id, &segments)?;
     store.save_speakers(id, &roster)?;

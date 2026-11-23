@@ -659,7 +659,7 @@ impl Worker {
     }
 }
 
-fn tail_chars(s: &str, n: usize) -> String {
+pub(crate) fn tail_chars(s: &str, n: usize) -> String {
     let count = s.chars().count();
     s.chars().skip(count.saturating_sub(n)).collect()
 }
