@@ -1,3 +1,6 @@
+Status: doing
+Branch: moacyrricardo/spec-020-postcall-transcript-build
+
 # 020 — After-call per-track transcript
 
 ## Context
