@@ -94,6 +94,7 @@ pub struct Workflow {
     pub updates: Updates,
     /// Seconds between automatic summaries with `updates = "custom"`; 0 = only when asked.
     pub summary_every_s: u32,
+    pub transcript_after: bool,
     pub speakers_after: bool,
     pub notes_after: bool,
     pub notes_device: Device,
@@ -108,6 +109,7 @@ impl Default for Workflow {
             live_device: Device::Gpu,
             updates: Updates::Balanced,
             summary_every_s: 300,
+            transcript_after: true,
             speakers_after: true,
             notes_after: true,
             notes_device: Device::Gpu,
@@ -487,10 +489,12 @@ mod tests {
         std::fs::write(&path, format!("# keep me\n{old}")).unwrap();
         let cfg = Config::load_or_create_at(&path).unwrap();
         assert_eq!(cfg.workflow, Workflow::default());
+        assert!(cfg.workflow.transcript_after);
+        assert!(toml::from_str::<Workflow>("speakers_after = false").unwrap().transcript_after);
         assert_eq!(cfg.pace(), Pace { min_chunk_s: 8, chunk_s: 30, summary_every_s: Some(300) });
         assert_eq!(cfg.live_devices(), (Device::Gpu, Device::Gpu));
 
-        let w = Workflow { live_summary: false, live_device: Device::Cpu, updates: Updates::Light, notes_device: Device::Cpu, ..Workflow::default() };
+        let w = Workflow { transcript_after: false, live_summary: false, live_device: Device::Cpu, updates: Updates::Light, notes_device: Device::Cpu, ..Workflow::default() };
         Config::save_workflow(&path, &w).unwrap();
         Config::save_path(&path, ModelSetting::Segmentation, Path::new("/m/seg.onnx")).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();

@@ -202,6 +202,23 @@ impl Store {
         }
     }
 
+    pub fn clear_transcript_results(&self, id: &str) -> Result<()> {
+        let dir = self.dir(id);
+        let notes = dir.join("notes.json");
+        if notes.exists() { std::fs::remove_file(notes)?; }
+        let summaries = dir.join("summaries.json");
+        if summaries.exists() {
+            let mut all: Vec<Summary> = read_json(&summaries)?;
+            all.retain(|s| s.kind == crate::model::SummaryKind::Partial);
+            write_json(&summaries, &all)?;
+        }
+        self.update_meta(id, |m| {
+            m.processed = false;
+            m.steps_done.retain(|s| s != "speakers" && s != "notes");
+        })?;
+        Ok(())
+    }
+
     pub fn save_notes(&self, id: &str, notes: &crate::grounding::Notes) -> Result<()> {
         write_json(&self.dir(id).join("notes.json"), notes)
     }
