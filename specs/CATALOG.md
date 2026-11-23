@@ -20,4 +20,4 @@
 | 016 | done   | tasks-view                  | moacyrricardo/spec-016-tasks-view       | —     | filtered by meeting labels; no per-task labels |
 | 017 | done   | tray-and-icon               | moacyrricardo/spec-017-tray-and-icon-build | —     | icon without white corners; tray start/stop + show/hide |
 | 018 | todo   | per-track-transcription     | —                                        | —     | mic and call transcribed separately; replaces mix + loudness guess |
-| 020 | doing  | postcall-transcript         | moacyrricardo/spec-020-postcall-transcript-build | —     | after the call: mic and call transcribed separately; live kept; re-run button; imports same path |
+| 020 | done   | postcall-transcript         | moacyrricardo/spec-020-postcall-transcript-build | —     | after the call: mic and call transcribed separately; live kept; re-run button; imports same path |

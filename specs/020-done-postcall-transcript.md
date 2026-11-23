@@ -1,4 +1,4 @@
-Status: doing
+Status: done
 Branch: moacyrricardo/spec-020-postcall-transcript-build
 
 # 020 — After-call per-track transcript
@@ -289,3 +289,33 @@ any examples use invented lines.
 - **Overlapping speech** keeps both lines, ordered by start. There's no interleaving inside a line.
 - **Speaker cap** from the calendar invite (003 `max_speakers`) is a separate fix.
 - **Live transcription** is unchanged; per-track live work is 018.
+
+## Implementation Notes
+
+The recording, import, queue and CLI paths share the per-track Whisper implementation. Offline jobs
+release their owned server between requests when a recording starts. A finishing session can lend
+its live client. Interpolated words that cross a packing joint belong to the piece containing their
+midpoint, with both endpoints clipped to that piece. A new base transcript invalidates old checked
+notes and final summaries before optional regeneration.
+
+On the 638.2-second call, the MX230 per-track step took **376.9 seconds**. The original live archive
+contained 19 You and 66 Call lines. The per-track result contained 67 You and 94 Call lines before
+speaker splitting. Of 73 lines starting within two seconds of a line on the other track, 47 matched
+the louder track across their span and 64 contained overlapping audio. Eight of nine non-overlap
+lines matched. The exception was one interpolated Call word lasting 0.33 seconds immediately after a
+Call burst. Its assigned interval extended into the quieter tail. No speed threshold applies.
+
+The CLI uses the same packed Call path for `eval-notes`. Its results use a different transcript from
+the original spec 005 benchmarks and cannot be compared directly. The browser preview exercised
+settings, record-only locking, wrap-up, retry progress and deleted audio. Native GNOME recording,
+reuse of the loaded Whisper process at stop, and pausing a model-backed job for a real call still
+need a desktop hand test.
+
+The 75.2-second import produced 13 Call lines with speakers and checked notes. An explicit fixture
+retry with automatic per-track transcription turned off regenerated the tracks, speaker roster and
+checked notes, with a byte-identical live archive. Both one-track-missing cases on recordings with
+live text, and the no-audio case, preserved the saved and live transcripts.
+
+Restoring the real call's live source selected 19 You and 78 Call lines after speaker splitting. An
+initial notes pass failed. Retrying on the final build wrote the checked notes and preserved the
+live archive checksum. The acceptance run used a temporary keep-audio policy.
