@@ -2,14 +2,19 @@
   import { live } from "../lib/live.svelte";
   import mascot from "../assets/mascot.jpg";
 
-  let { onopen }: { onopen: (id: string) => void } = $props();
+  import type { Workflow } from "../lib/types";
+  import { transcriptDevice } from "../lib/workflow";
 
-  const STEPS = [
+  let { onopen, workflow }: { workflow?: Workflow; onopen: (id: string) => void } = $props();
+
+  const steps = $derived([
     { id: "transcribing", title: "Finish transcription", detail: "last chunk · Whisper on the GPU", chip: "GPU" },
+    ...(live.steps.includes("tracks") || (workflow && (!workflow.live_transcript || workflow.transcript_after))
+      ? [{ id: "tracks", title: "Transcribe each track", detail: "mic and call separately", chip: workflow ? transcriptDevice(workflow).toUpperCase() : "Whisper" }] : []),
     { id: "speakers", title: "Separate speakers", detail: "who said what on the call · runs on the processor", chip: "CPU" },
     { id: "summarizing", title: "Write checked notes", detail: "summary, decisions and tasks — each checked against what was said", chip: "GPU" },
     { id: "saving", title: "Save notes", detail: "transcript, summary and both audio tracks stay on this computer", chip: "disk" },
-  ];
+  ]);
 
   function state(id: string): "done" | "run" | "todo" {
     const i = live.steps.lastIndexOf(id);
@@ -24,7 +29,7 @@
   <h1>Wrapping up your meeting</h1>
   <div class="muted">You can keep working — the notes open when they're ready.</div>
   <div class="steps">
-    {#each STEPS as s}
+    {#each steps as s}
       {@const st = state(s.id)}
       <div class="step {st}">
         <span class="st">{st === "done" ? "✓" : ""}</span>

@@ -61,7 +61,7 @@ const config: ConfigView = {
   llm_model: "Qwen3.5-2B-Q4_K_M",
   config: {
     language: "pt", chunk_seconds: 30, min_chunk_seconds: 8,
-    workflow: { live_transcript: true, live_summary: true, layout: "swap", live_device: "gpu", updates: "balanced", summary_every_s: 300, speakers_after: true, notes_after: true, notes_device: "gpu" },
+    workflow: { live_transcript: true, live_summary: true, layout: "swap", live_device: "gpu", updates: "balanced", summary_every_s: 300, transcript_after: true, speakers_after: true, notes_after: true, notes_device: "gpu" },
     whisper: { server: "~/.local/share/fofoca/bin/whisper/whisper-server", model: "~/.local/share/fofoca/models/ggml-large-v3-turbo-q5_0.bin", device: 0, threads: 4, vad_model: "~/.local/share/fofoca/models/ggml-silero-v5.1.2.bin" },
     llm: { server: "llama-server", model: "Qwen3.5-2B-Q4_K_M.gguf", device: "Vulkan1", context: 32768, threads: 4 },
   },
@@ -132,13 +132,35 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       return structuredClone(m) as T;
     }
     case "pick_recording": return "/home/you/Gravações/reuniao-cliente-bh.m4a" as T;
+    case "retranscribe": {
+      const m = meetings.find((x) => x.meta.id === args?.id);
+      if (!m || m.meta.audio_deleted_at) throw new Error("The audio was deleted");
+      if (live?.id === m.meta.id) throw new Error("This meeting is still recording");
+      const w = config.config.workflow!;
+      const steps: [JobEvent["step"], number][] = [["tracks", 0], ["tracks", 0.5], ["tracks", 1]];
+      if (w.speakers_after) steps.push(["speakers", 0]);
+      if (w.notes_after) steps.push(["notes", 0]);
+      steps.push(["done", 1]);
+      jobListener?.({ meeting_id: m.meta.id, step: "queued", progress: 0 });
+      steps.forEach(([step, progress], i) => window.setTimeout(() => {
+        if (step === "done") m.meta.steps_done = ["tracks", ...(w.speakers_after ? ["speakers"] : []), ...(w.notes_after ? ["notes"] : [])];
+        jobListener?.({ meeting_id: m.meta.id, step, progress });
+      }, 600 + i * 750));
+      return undefined as T;
+    }
     case "import_recording": {
       const id = `2026-11-20-0900${meetings.length}`;
       const meta: MeetingMeta = { id, title: String(args?.title ?? "") || "reuniao-cliente-bh", started_at: "2026-11-20T09:00:00-03:00", duration_s: 0, finished: false, imported_from: "reuniao-cliente-bh.m4a", labels: normalizeLabels((args?.labels as string[]) ?? []) };
       meetings.unshift({ meta, segments: [], summaries: [] });
+      jobListener?.({ meeting_id: id, step: "queued", progress: 0 });
       const steps: [JobEvent["step"], number][] = [["converting", 0], ["transcribing", 0.1], ["transcribing", 0.4], ["transcribing", 0.8], ["speakers", 0], ["notes", 0], ["done", 1]];
       steps.forEach(([step, progress], i) => window.setTimeout(() => {
-        if (step === "done") { const m = meetings.find((x) => x.meta.id === id)!; m.meta = { ...m.meta, finished: true, duration_s: 1920 }; m.segments = separated; m.speakers = { s1: {}, s2: {} }; }
+        if (step === "done") {
+          const m = meetings.find((x) => x.meta.id === id)!;
+          m.meta = { ...m.meta, finished: true, duration_s: 1920, steps_done: ["tracks", "speakers", "notes"] };
+          m.segments = separated.filter((s) => s.track === "call");
+          m.speakers = { s1: {}, s2: {} };
+        }
         jobListener?.({ meeting_id: id, step, progress });
       }, 600 + i * 1100));
       return meta as T;
@@ -216,6 +238,8 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       emit({ type: "stopping" });
       timers.forEach(clearTimeout); timers = [];
       emit({ type: "step", step: "transcribing" });
+      if (!config.config.workflow!.live_transcript || config.config.workflow!.transcript_after)
+        timers.push(window.setTimeout(() => emit({ type: "step", step: "tracks" }), 750));
       timers.push(window.setTimeout(() => emit({ type: "step", step: "summarizing" }), 1500));
       timers.push(window.setTimeout(() => emit({ type: "summary", summary: meetings[0].summaries[0] }), 4500));
       timers.push(window.setTimeout(() => emit({ type: "step", step: "saving" }), 4700));

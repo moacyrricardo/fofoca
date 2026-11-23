@@ -1,7 +1,7 @@
 <script lang="ts">
   // Settings → Processing (spec 015): what runs during and after a call, and where.
   import type { Device, Layout, Updates, Workflow, WorkflowView } from "../lib/types";
-  import { LAYOUTS, UPDATES, afterSteps, fmt, peakMib, unavailable } from "../lib/workflow";
+  import { LAYOUTS, UPDATES, afterSteps, fmt, peakMib, transcriptDevice, unavailable } from "../lib/workflow";
   import { shortModel } from "../lib/format";
 
   let { view, onchange, ongomodels }: { view: WorkflowView; onchange: (w: Workflow) => void; ongomodels: () => void } = $props();
@@ -93,9 +93,10 @@
   <div class="card">
     <h2>After the call</h2>
     <div class="steps">
-      {#if !w.live_transcript}
-        <div class="step"><input type="checkbox" checked disabled /><span>Transcribe the recording <span class="faint">— live transcript is off, so this runs when you stop</span></span><span class="chip {w.live_device}">{w.live_device.toUpperCase()}</span></div>
-      {/if}
+      <label class="step"><input type="checkbox" checked={!w.live_transcript || w.transcript_after} disabled={!w.live_transcript}
+        onchange={(e) => set({ transcript_after: e.currentTarget.checked })} />
+        <span>Transcript from each track <span class="faint">— transcribes your mic and the call separately, so every line is on the right side</span></span>
+        <span class="chip {transcriptDevice(w)}">{transcriptDevice(w).toUpperCase()}</span></label>
       <label class="step"><input type="checkbox" checked={w.speakers_after} onchange={(e) => set({ speakers_after: (e.target as HTMLInputElement).checked })} />
         <span>Separate speakers <span class="faint">— names each voice on the call; 40 s of audio took 1.2 s</span></span><span class="chip cpu">CPU</span></label>
       <label class="step"><input type="checkbox" checked={w.notes_after} onchange={(e) => set({ notes_after: (e.target as HTMLInputElement).checked })} />
@@ -107,7 +108,7 @@
     <div class="flow"><span class="faint">When you stop:</span>
       {#each afterSteps(w) as s, i}{#if i}<span class="arrow">→</span>{/if}<span class="chip {s.device ?? ''}">{s.name === "Storage" ? "Storage: audio policy" : s.name}</span>{/each}
     </div>
-    <p class="faint small note">Imports follow the same steps.</p>
+    <p class="faint small note">Imports follow the same steps. They're always transcribed this way.</p>
   </div>
 </fieldset>
 
