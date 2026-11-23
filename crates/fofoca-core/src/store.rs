@@ -144,18 +144,21 @@ impl Store {
         Ok(())
     }
 
-    /// A hard link publishes the backup once, atomically. Saved transcripts are
-    /// replaced by rename after live capture ends, so this inode stays intact.
+    /// Publish a complete, independent snapshot once, including on concurrent retries.
     pub fn keep_live(&self, id: &str) -> Result<()> {
         let dir = self.dir(id);
         let saved = dir.join("transcript.jsonl");
-        if saved.exists() && !dir.join("transcript.tracks.jsonl").exists() {
-            match std::fs::hard_link(saved, dir.join("transcript.live.jsonl")) {
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
-                other => other?,
-            }
+        let live = dir.join("transcript.live.jsonl");
+        if !saved.exists() || live.exists() || dir.join("transcript.tracks.jsonl").exists() {
+            return Ok(());
         }
-        Ok(())
+        let mut snapshot = tempfile::NamedTempFile::new_in(dir)?;
+        std::io::copy(&mut std::fs::File::open(saved)?, &mut snapshot)?;
+        match snapshot.persist_noclobber(live) {
+            Ok(_) => Ok(()),
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e.error.into()),
+        }
     }
 
     pub fn replace_transcript(&self, id: &str, segments: &[Segment]) -> Result<()> {
@@ -305,14 +308,15 @@ impl Store {
 }
 
 fn write_segments(path: &Path, segments: &[Segment]) -> Result<()> {
-    let tmp = path.with_extension("jsonl.tmp");
-    let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+    let tmp = tempfile::NamedTempFile::new_in(path.parent().context("missing transcript directory")?)?;
+    let mut file = std::io::BufWriter::new(tmp.as_file());
     for segment in segments {
         serde_json::to_writer(&mut file, segment)?;
         writeln!(file)?;
     }
     file.flush()?;
-    std::fs::rename(tmp, path)?;
+    drop(file);
+    tmp.persist(path)?;
     Ok(())
 }
 

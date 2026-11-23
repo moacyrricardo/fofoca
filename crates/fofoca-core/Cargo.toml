@@ -13,6 +13,7 @@ serde_json.workspace = true
 toml = "0.8"
 toml_edit = "0.22"
 hound = "3.5"
+tempfile = "3"
 dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 rrule = "0.14"

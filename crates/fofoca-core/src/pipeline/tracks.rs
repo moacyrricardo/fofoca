@@ -373,6 +373,10 @@ mod tests {
     fn both_tracks_and_source_round_trip_preserve_live() {
         let f = Fixture::new(true, false, &["mic.wav", "system.wav"]);
         let before = f.store.load(&f.id).unwrap().segments;
+        f.store.keep_live(&f.id).unwrap();
+        f.store.append_segment(&f.id, &line(1., 2., Track::You)).unwrap();
+        f.store.keep_live(&f.id).unwrap();
+        assert_eq!(f.store.live_transcript(&f.id).unwrap(), before);
         let client = server(vec![(200, VTT); 4]);
         for _ in 0..2 {
             assert!(matches!(

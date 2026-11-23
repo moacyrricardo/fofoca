@@ -1,7 +1,7 @@
 //! Post-call steps (spec 003; 005 and 012 add to it). Each step records itself in
 //! `meta.steps_done` when it succeeds, so a failed one can be re-run alone.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::time::Instant;
 
 use crate::config::Config;
@@ -74,7 +74,8 @@ pub fn retranscribe(store: &Store, cfg: &Config, id: &str, hooks: &Hooks) -> Res
         TrackResult::Skipped(reason) => anyhow::bail!(reason),
         TrackResult::Done(counts) => counts,
     };
-    let (speakers, notes) = finish_transcript(store, cfg, id, hooks, true)?;
+    let (speakers, notes) = finish_transcript(store, cfg, id, hooks, true)
+        .with_context(|| format!("You {}, Call {}, tracks {:.1}s", counts.you, counts.call, counts.took_s))?;
     Ok(ChainReport { tracks: counts, speakers, notes })
 }
 
@@ -82,15 +83,15 @@ pub fn retranscribe(store: &Store, cfg: &Config, id: &str, hooks: &Hooks) -> Res
 /// Even a disabled or failing notes step must not display obsolete checked notes.
 pub fn finish_transcript(store: &Store, cfg: &Config, id: &str, hooks: &Hooks, apply_retention: bool) -> Result<(String, String)> {
     store.clear_transcript_results(id)?;
-    let mut failures = vec![];
+    let mut ok = true;
     let mut speakers = String::from("off");
     if cfg.workflow.speakers_after && (apply_retention || store.dir(id).join("system.wav").is_file()) {
         hooks.wait_for_gpu();
         (hooks.progress)(STEP_SPEAKERS, 0.);
         match separate_speakers(store, cfg, id) {
             Ok(StepResult::Done { speakers: n, .. }) => speakers = format!("{n} voices"),
-            Ok(StepResult::Skipped(reason)) => failures.push(reason),
-            Err(e) => failures.push(format!("speakers failed: {e:#}")),
+            Ok(StepResult::Skipped(reason)) => { ok = false; speakers = reason; }
+            Err(e) => { ok = false; speakers = format!("failed ({e})"); }
         }
     }
     let mut notes = String::from("off");
@@ -103,21 +104,21 @@ pub fn finish_transcript(store: &Store, cfg: &Config, id: &str, hooks: &Hooks, a
             (hooks.progress)(STEP_NOTES, 0.);
             match write_notes(store, cfg, id) {
                 Ok(()) => notes = String::from("written"),
-                Err(e) => failures.push(format!("notes failed: {e:#}")),
+                // Model parse errors may contain generated text. This chain also powers the counts-only CLI.
+                Err(_) => { ok = false; notes = String::from("failed to write checked notes"); }
             }
         }
     }
     store.update_meta(id, |m| {
         if apply_retention { m.finished = true; }
-        m.processed = failures.is_empty();
+        m.processed = ok;
     })?;
-    anyhow::ensure!(failures.is_empty(), "{}", failures.join("; "));
+    anyhow::ensure!(ok, "Speakers {speakers}, notes {notes}");
     if apply_retention {
         crate::retention::apply(store, &cfg.audio, chrono::Local::now().fixed_offset(), Some(id), false)?;
     }
     Ok((speakers, notes))
 }
-
 
 /// Load the summary model and write checked notes (+ the Markdown copy as the final summary).
 pub fn write_notes(store: &Store, cfg: &Config, id: &str) -> Result<()> {
@@ -134,7 +135,7 @@ pub fn write_notes(store: &Store, cfg: &Config, id: &str) -> Result<()> {
 }
 
 /// Separate the voices on the call track (CPU) and put them on the transcript. Re-running starts
-/// again from the live transcript; names already given to `s1`, `s2`, … are kept.
+/// again from the selected base transcript; names already given to `s1`, `s2`, … are kept.
 pub fn separate_speakers(store: &Store, cfg: &Config, id: &str) -> Result<StepResult> {
     let dc = &cfg.diarization;
     if !dc.segmentation_model.exists() || !dc.embedding_model.exists() {

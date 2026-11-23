@@ -327,7 +327,17 @@ impl Config {
     pub fn save_workflow(path: &Path, w: &Workflow) -> Result<()> {
         edit_file(path, |doc| {
             let table: toml_edit::DocumentMut = toml::to_string(w)?.parse()?;
-            doc["workflow"] = toml_edit::Item::Table(table.as_table().clone());
+            if !doc.contains_key("workflow") {
+                doc["workflow"] = toml_edit::table();
+            }
+            for (key, value) in table.iter() {
+                let slot = &mut doc["workflow"][key];
+                let mut next = value.clone();
+                if let (Some(old), Some(new)) = (slot.as_value(), next.as_value_mut()) {
+                    *new.decor_mut() = old.decor().clone();
+                }
+                *slot = next;
+            }
             Ok(())
         })
     }
@@ -495,11 +505,13 @@ mod tests {
         assert_eq!(cfg.live_devices(), (Device::Gpu, Device::Gpu));
 
         let w = Workflow { transcript_after: false, live_summary: false, live_device: Device::Cpu, updates: Updates::Light, notes_device: Device::Cpu, ..Workflow::default() };
+        std::fs::write(&path, format!("# keep me\n{old}\n[workflow]\n# keep this setting\ntranscript_after = true # per track\n")).unwrap();
         Config::save_workflow(&path, &w).unwrap();
         Config::save_path(&path, ModelSetting::Segmentation, Path::new("/m/seg.onnx")).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.starts_with("# keep me"), "{saved}");
         let cfg = Config::load_or_create_at(&path).unwrap();
+        assert!(saved.contains("# keep this setting") && saved.contains("false # per track"));
         assert_eq!(cfg.workflow, w);
         assert_eq!(cfg.diarization.segmentation_model, PathBuf::from("/m/seg.onnx"));
         assert_eq!(cfg.pace().summary_every_s, None);

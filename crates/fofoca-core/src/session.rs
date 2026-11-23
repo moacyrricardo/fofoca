@@ -306,6 +306,10 @@ impl Worker {
             }
         }
         // Spec 011: with "delete after processing", the audio goes now.
+        if !processed {
+            (self.emit)(SessionEvent::Finished { meeting: self.meeting.clone() });
+            return;
+        }
         match crate::retention::apply(&self.store, &self.cfg.audio, chrono::Local::now().fixed_offset(), Some(&self.meeting.id), false) {
             Ok(freed) if !freed.is_empty() => {
                 self.notice("Audio deleted after processing, as set in Settings — the transcript and notes are kept.");
@@ -594,7 +598,7 @@ impl Worker {
                 Ok(()) => {
                     let _ = pipeline::mark_done(&self.store, &self.meeting.id, pipeline::STEP_NOTES);
                 }
-                Err(e) => self.error(format!("saving notes: {e:#}")),
+                Err(e) => { self.post_ok = false; self.error(format!("saving notes: {e:#}")); }
             }
         }
         if kind == SummaryKind::Final && (fallback.is_some() || result.is_err()) {
@@ -613,6 +617,7 @@ impl Worker {
                     gen_tokens_per_s: c.gen_tokens_per_s,
                 };
                 if let Err(e) = self.store.add_summary(&self.meeting.id, &summary) {
+                    self.post_ok = false;
                     self.error(format!("saving summary: {e:#}"));
                 }
                 (self.emit)(SessionEvent::Summary { summary });
