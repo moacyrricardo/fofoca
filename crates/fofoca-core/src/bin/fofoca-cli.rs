@@ -192,7 +192,8 @@ fn diarize_wav(cfg: &Config, args: &[String]) -> Result<()> {
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let opts = fofoca_core::diarize::Options {
         threshold: flag("--threshold").map(|s| s.parse()).transpose()?.unwrap_or(cfg.diarization.threshold),
-        max_speakers: flag("--max").map(|s| s.parse()).transpose()?.unwrap_or(8),
+        max_speakers: flag("--max").map(|s| s.parse()).transpose()?,
+        min_cluster_s: fofoca_core::diarize::MIN_CLUSTER_S,
     };
     let samples = audio::read_wav(path.as_ref())?;
     let t0 = Instant::now();

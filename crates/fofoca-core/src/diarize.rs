@@ -29,10 +29,17 @@ pub struct Turn {
 }
 
 pub struct Options {
-    /// Cosine similarity above which two clusters are the same person.
+    /// Cosine similarity above which two clusters are the same person. Agglomeration stops here.
     pub threshold: f32,
-    pub max_speakers: usize,
+    /// Cap on speakers, applied only after small clusters are folded in. `None` = no cap.
+    pub max_speakers: Option<usize>,
+    /// A cluster with less speech than `min(min_cluster_s, 10 % of all embedded speech)` is folded
+    /// into the nearest larger one. Normally [`MIN_CLUSTER_S`].
+    pub min_cluster_s: f64,
 }
+
+/// Default minimum speech (seconds) for a cluster to stand as its own speaker (spec 022).
+pub const MIN_CLUSTER_S: f64 = 10.0;
 
 /// Turns shorter than this get no embedding of their own (too little voice to identify); they
 /// take the speaker of the nearest identified turn.
@@ -60,7 +67,8 @@ pub fn separate(samples: &[i16], segmentation_model: &Path, embedding_model: &Pa
         };
         embeddings.push(e);
     }
-    let labels = cluster(&embeddings, opts);
+    let durations: Vec<f64> = regions.iter().map(|&(start, end)| end - start).collect();
+    let labels = cluster(&embeddings, &durations, opts);
     Ok(regions.iter().zip(labels).map(|(&(start, end), speaker)| Turn { start, end, speaker }).collect())
 }
 
@@ -170,15 +178,34 @@ fn normalize(v: &[f32]) -> Vec<f32> {
     v.iter().map(|x| x / n).collect()
 }
 
-/// Average-linkage agglomerative clustering on cosine similarity. Regions without an embedding
-/// take the label of the nearest region (by index, i.e. time) that has one. Labels are 1-based in
-/// order of first appearance.
-fn cluster(embeddings: &[Option<Vec<f32>>], opts: &Options) -> Vec<u32> {
+fn sim(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// The most similar pair `(i, j, similarity)` with `i < j` under `score`; `None` if fewer than 2.
+fn most_similar_pair(n: usize, score: impl Fn(usize, usize) -> f32) -> Option<(usize, usize, f32)> {
+    let mut best: Option<(usize, usize, f32)> = None;
+    for i in 0..n {
+        for j in i + 1..n {
+            let s = score(i, j);
+            if best.is_none_or(|b| s > b.2) {
+                best = Some((i, j, s));
+            }
+        }
+    }
+    best
+}
+
+/// Average-linkage agglomerative clustering on cosine similarity, stopping at the threshold; then
+/// small clusters are folded into the nearest large one, then the optional speaker cap merges
+/// large clusters (spec 022). `durations` are the regions' lengths in seconds. Regions without an
+/// embedding take the label of the nearest region (by index, i.e. time) that has one. Labels are
+/// 1-based in order of first appearance.
+fn cluster(embeddings: &[Option<Vec<f32>>], durations: &[f64], opts: &Options) -> Vec<u32> {
     let items: Vec<(usize, Vec<f32>)> = embeddings.iter().enumerate().filter_map(|(i, e)| e.as_ref().map(|e| (i, normalize(e)))).collect();
     if items.is_empty() {
         return vec![1; embeddings.len()];
     }
-    let sim = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
     // clusters as lists of item indices; pairwise average similarity recomputed (n is small)
     let mut clusters: Vec<Vec<usize>> = (0..items.len()).map(|i| vec![i]).collect();
     let avg = |a: &[usize], b: &[usize]| {
@@ -190,23 +217,50 @@ fn cluster(embeddings: &[Option<Vec<f32>>], opts: &Options) -> Vec<u32> {
         }
         s / (a.len() * b.len()) as f32
     };
-    loop {
-        let mut best = (0, 0, f32::MIN);
-        for i in 0..clusters.len() {
-            for j in i + 1..clusters.len() {
-                let s = avg(&clusters[i], &clusters[j]);
-                if s > best.2 {
-                    best = (i, j, s);
-                }
-            }
-        }
-        let too_many = clusters.len() > opts.max_speakers.max(1);
-        if clusters.len() < 2 || (best.2 < opts.threshold && !too_many) {
+    // no forced merges here: a cap applied during agglomeration glues real speakers together
+    // while short noisy clusters stay apart
+    while let Some((i, j, s)) = most_similar_pair(clusters.len(), |i, j| avg(&clusters[i], &clusters[j])) {
+        if s < opts.threshold {
             break;
         }
-        let merged = clusters.remove(best.1);
-        clusters[best.0].extend(merged);
+        let merged = clusters.remove(j);
+        clusters[i].extend(merged);
     }
+
+    // minimum cluster size: fold each region of a small cluster into the most similar large one
+    let speech = |c: &[usize]| c.iter().map(|&m| durations[items[m].0]).sum::<f64>();
+    let total: f64 = items.iter().map(|(i, _)| durations[*i]).sum();
+    let min_s = opts.min_cluster_s.min(0.1 * total);
+    let (mut large, mut small): (Vec<Vec<usize>>, Vec<Vec<usize>>) = clusters.into_iter().partition(|c| speech(c) >= min_s);
+    if large.is_empty() {
+        let k = (0..small.len()).max_by(|&a, &b| speech(&small[a]).total_cmp(&speech(&small[b]))).unwrap_or(0);
+        large.push(small.remove(k));
+    }
+    let centroid = |c: &[usize]| {
+        let mut m = vec![0.0f32; items[c[0]].1.len()];
+        for &i in c {
+            for (x, y) in m.iter_mut().zip(&items[i].1) {
+                *x += y;
+            }
+        }
+        normalize(&m)
+    };
+    let centroids: Vec<Vec<f32>> = large.iter().map(|c| centroid(c)).collect();
+    for m in small.into_iter().flatten() {
+        let k = (0..large.len()).max_by(|&a, &b| sim(&items[m].1, &centroids[a]).total_cmp(&sim(&items[m].1, &centroids[b]))).unwrap_or(0);
+        large[k].push(m);
+    }
+
+    // speaker cap, after cleanup only
+    if let Some(n) = opts.max_speakers {
+        while large.len() > n.max(1) {
+            let cs: Vec<Vec<f32>> = large.iter().map(|c| centroid(c)).collect();
+            let Some((i, j, _)) = most_similar_pair(large.len(), |i, j| sim(&cs[i], &cs[j])) else { break };
+            let merged = large.remove(j);
+            large[i].extend(merged);
+        }
+    }
+    let clusters = large;
     let mut label_of_item = vec![0usize; items.len()];
     for (c, members) in clusters.iter().enumerate() {
         for &m in members {
@@ -276,15 +330,53 @@ mod tests {
         let a2 = Some(vec![0.9, 0.2, 0.0]);
         let b = Some(vec![0.0, 1.0, 0.1]);
         let b2 = Some(vec![0.1, 0.9, 0.0]);
-        let opts = Options { threshold: 0.5, max_speakers: 6 };
+        let opts = Options { threshold: 0.5, max_speakers: None, min_cluster_s: MIN_CLUSTER_S };
         // a short region without embedding takes its nearest neighbour's label
-        assert_eq!(cluster(&[a.clone(), b.clone(), None, b2.clone(), a2.clone()], &opts), vec![1, 2, 2, 2, 1]);
-        // max_speakers forces merging
-        let c = Some(vec![0.0, 0.0, 1.0]);
-        let opts1 = Options { threshold: 0.99, max_speakers: 2 };
-        let labels = cluster(&[a, b, c], &opts1);
-        assert_eq!(labels.iter().collect::<std::collections::HashSet<_>>().len(), 2);
+        assert_eq!(cluster(&[a.clone(), b.clone(), None, b2.clone(), a2.clone()], &[5.0, 5.0, 0.5, 5.0, 5.0], &opts), vec![1, 2, 2, 2, 1]);
         // nothing embedded: everyone is speaker 1
-        assert_eq!(cluster(&[None, None], &opts), vec![1, 1]);
+        assert_eq!(cluster(&[None, None], &[0.5, 0.5], &opts), vec![1, 1]);
+    }
+
+    fn speakers(labels: &[u32]) -> usize {
+        labels.iter().collect::<std::collections::HashSet<_>>().len()
+    }
+
+    #[test]
+    fn small_clusters_fold_into_the_nearest_large_one() {
+        let a = Some(vec![1.0, 0.1, 0.0]);
+        let a2 = Some(vec![0.9, 0.2, 0.0]);
+        let b = Some(vec![0.0, 1.0, 0.1]);
+        let b2 = Some(vec![0.1, 0.9, 0.0]);
+        // far from both groups (below the threshold), but nearer to A
+        let odd = Some(vec![0.3, 0.0, 1.0]);
+        let regions = [a, b, odd, b2, a2];
+        let durations = [8.0, 8.0, 1.0, 8.0, 8.0];
+        let opts = Options { threshold: 0.4, max_speakers: None, min_cluster_s: MIN_CLUSTER_S };
+        assert_eq!(cluster(&regions, &durations, &opts), vec![1, 2, 1, 2, 1]);
+        // the cap applies after cleanup
+        let capped = Options { max_speakers: Some(1), ..opts };
+        assert_eq!(cluster(&regions, &durations, &capped), vec![1; 5]);
+    }
+
+    #[test]
+    fn no_forced_merges_without_a_cap() {
+        // regression: the old max_speakers forced merges during agglomeration
+        let v = |x: f32, y: f32, z: f32| Some(vec![x, y, z]);
+        let regions = [v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), v(0.0, 0.0, 1.0), v(0.7, 0.7, 0.0)];
+        let opts = Options { threshold: 1.01, max_speakers: None, min_cluster_s: 0.0 };
+        assert_eq!(cluster(&regions, &[5.0; 4], &opts), vec![1, 2, 3, 4]);
+        // with a cap of 2, only centroids merge: the two most similar first
+        let opts2 = Options { max_speakers: Some(2), ..opts };
+        assert_eq!(speakers(&cluster(&regions, &[5.0; 4], &opts2)), 2);
+    }
+
+    #[test]
+    fn when_no_cluster_is_large_the_biggest_one_keeps_everyone() {
+        // 12 orthogonal voices of 1 s each: every cluster holds 1/12 < 10 % of the speech
+        let regions: Vec<Option<Vec<f32>>> = (0..12).map(|i| Some((0..12).map(|j| if i == j { 1.0 } else { 0.0 }).collect())).collect();
+        let mut durations = vec![1.0; 12];
+        durations[5] = 1.05;
+        let opts = Options { threshold: 0.4, max_speakers: None, min_cluster_s: MIN_CLUSTER_S };
+        assert_eq!(cluster(&regions, &durations, &opts), vec![1; 12]);
     }
 }

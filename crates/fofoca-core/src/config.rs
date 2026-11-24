@@ -193,7 +193,8 @@ impl Default for AudioConfig {
 pub struct DiarizationConfig {
     pub segmentation_model: PathBuf,
     pub embedding_model: PathBuf,
-    /// Cosine similarity above which two voices are the same person.
+    /// Cosine similarity above which two voices are the same person. Default 0.4 (spec 022,
+    /// measured: 0.3–0.4 gives the right speaker count on test mixes and real calls).
     pub threshold: f32,
 }
 
@@ -203,7 +204,7 @@ impl Default for DiarizationConfig {
         DiarizationConfig {
             segmentation_model: models.join("segmentation-3.0.onnx"),
             embedding_model: models.join("wespeaker_en_voxceleb_CAM++.onnx"),
-            threshold: 0.5,
+            threshold: 0.4,
         }
     }
 }
@@ -517,6 +518,20 @@ mod tests {
         assert_eq!(cfg.pace().summary_every_s, None);
         assert_eq!(cfg.live_devices(), (Device::Cpu, Device::Cpu));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn diarization_threshold_defaults_to_0_4_and_a_set_value_is_kept() {
+        // a file without a [diarization] table (like most existing ones) gets the new default
+        let mut doc: toml_edit::DocumentMut = toml::to_string_pretty(&Config::default()).unwrap().parse().unwrap();
+        doc.remove("diarization");
+        assert_eq!(toml::from_str::<Config>(&doc.to_string()).unwrap().diarization.threshold, 0.4);
+        // a file that sets it keeps its value
+        doc["diarization"] = toml_edit::table();
+        doc["diarization"]["segmentation_model"] = toml_edit::value("s");
+        doc["diarization"]["embedding_model"] = toml_edit::value("e");
+        doc["diarization"]["threshold"] = toml_edit::value(0.55);
+        assert_eq!(toml::from_str::<Config>(&doc.to_string()).unwrap().diarization.threshold, 0.55);
     }
 
     #[test]

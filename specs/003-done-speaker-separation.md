@@ -42,7 +42,7 @@ pipeline steps instead of today's fixed three.
   replace it.
 - Models (`segmentation-3.0.onnx` ~6 MB, `wespeaker_en_voxceleb_CAM++.onnx` ~28 MB) go in
   `~/.local/share/fofoca/models/`; config `[diarization] segmentation_model`, `embedding_model`,
-  `threshold = 0.5`. Missing models → step skipped with a notice (downloads arrive with 006).
+  `threshold = 0.5` (0.4 since spec 022). Missing models → step skipped with a notice (downloads arrive with 006).
 - Runs on **CPU only**, in parallel with nothing else on the GPU being needed; budget target ≤ 3 min
   per hour of audio on the i7-10510U (measure with the MLS file and the user's recording; record in
   the spec notes).
@@ -107,7 +107,7 @@ pipeline steps instead of today's fixed three.
   speaker names in the prompt (`[mm:ss] Fernanda: …`).
 - The pipeline module holds the speakers step only; the final summary still runs in the session
   and moves to `pipeline.rs` with 005 as planned.
-- `max_speakers = max(attendees + 1, 4)`; re-running keeps names by key (`s1`, `s2`, …), which
+- `max_speakers = max(attendees + 1, 4)` (removed by spec 022: no cap, small clusters folded); re-running keeps names by key (`s1`, `s2`, …), which
   can attach a name to a different voice if clustering changes — the Speakers tab shows sample
   lines so it's visible.
 - Tests: assignment/splitting, gap filling, roster, display names, region building, clustering,
