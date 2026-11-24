@@ -102,7 +102,7 @@ fn frame_time(window: usize, frame: usize) -> f64 {
 }
 
 /// Speech regions `(start_s, end_s)` from segmentation-3.0, split at speaker-class changes.
-fn speech_regions(samples: &[i16], model: &Path) -> Result<Vec<(f64, f64)>> {
+pub fn speech_regions(samples: &[i16], model: &Path) -> Result<Vec<(f64, f64)>> {
     // segmentation-3.0 is unaffected by the optimizer (identical regions either way).
     let mut sess = session(model, GraphOptimizationLevel::Level3)?;
     let mut padded = samples.to_vec();
@@ -291,6 +291,77 @@ fn cluster(embeddings: &[Option<Vec<f32>>], durations: &[f64], opts: &Options) -
         .collect()
 }
 
+/// A stretch of a known speaker in an accuracy fixture (`truth.txt`: `start end name` per line).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruthTurn {
+    pub start: f64,
+    pub end: f64,
+    pub name: String,
+}
+
+pub fn parse_truth(text: &str) -> Result<Vec<TruthTurn>> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let mut p = l.split_whitespace();
+            let (Some(a), Some(b), Some(name)) = (p.next(), p.next(), p.next()) else { bail!("truth line needs `start end name`: {l}") };
+            Ok(TruthTurn { start: a.parse()?, end: b.parse()?, name: name.to_string() })
+        })
+        .collect()
+}
+
+/// How well found turns match known ones.
+#[derive(Debug, PartialEq)]
+pub struct Score {
+    /// Distinct speakers in the found turns.
+    pub speakers_found: usize,
+    /// Distinct truth names, sorted.
+    pub names: Vec<String>,
+    /// Share (0..=1) of overlapping speech given to the right person after the best one-to-one
+    /// mapping of found speakers to names (greedy, largest overlap first).
+    pub speech_correct: f64,
+    /// Per found speaker, sorted: seconds overlapping each of `names`.
+    pub seconds: Vec<(u32, Vec<f64>)>,
+}
+
+/// Score found turns against truth (spec 022 accuracy tools).
+pub fn score(turns: &[Turn], truth: &[TruthTurn]) -> Score {
+    let mut names: Vec<String> = truth.iter().map(|t| t.name.clone()).collect();
+    names.sort();
+    names.dedup();
+    let mut found: Vec<u32> = turns.iter().map(|t| t.speaker).collect();
+    found.sort();
+    found.dedup();
+    let mut seconds: Vec<(u32, Vec<f64>)> = found.iter().map(|&s| (s, vec![0.0; names.len()])).collect();
+    for t in turns {
+        let row = found.binary_search(&t.speaker).unwrap_or_default();
+        for r in truth {
+            let overlap = t.end.min(r.end) - t.start.max(r.start);
+            if overlap > 0.0 {
+                let col = names.binary_search(&r.name).unwrap_or_default();
+                seconds[row].1[col] += overlap;
+            }
+        }
+    }
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for (h, (_, row)) in seconds.iter().enumerate() {
+        for (n, &v) in row.iter().enumerate() {
+            pairs.push((v, h, n));
+        }
+    }
+    pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let (mut used_h, mut used_n, mut correct) = (vec![false; seconds.len()], vec![false; names.len()], 0.0);
+    for (v, h, n) in pairs {
+        if !used_h[h] && !used_n[n] {
+            used_h[h] = true;
+            used_n[n] = true;
+            correct += v;
+        }
+    }
+    let total: f64 = seconds.iter().flat_map(|(_, r)| r).sum();
+    Score { speakers_found: found.len(), names, speech_correct: if total > 0.0 { correct / total } else { 0.0 }, seconds }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +446,47 @@ mod tests {
         let norm = got.iter().map(|x| x * x).sum::<f32>().sqrt();
         eprintln!("cosine {cos:.6}, norm {norm:.4} (reference {})", reference["norm"]);
         assert!(cos >= 0.999, "embedding drifted from the onnxruntime reference: cosine {cos}");
+    }
+
+    #[test]
+    fn scoring_maps_speakers_one_to_one() {
+        let truth = parse_truth("0 10 ana\n10.3 20 bia\n\n20.3 30 ana\n").unwrap();
+        assert_eq!(truth[1], TruthTurn { start: 10.3, end: 20.0, name: "bia".into() });
+        let turn = |start, end, speaker| Turn { start, end, speaker };
+        // speaker 1 = ana, speaker 2 = bia but also grabs 2 s of ana, speaker 3 = 1 s of ana
+        let found = [turn(0.0, 10.0, 1), turn(10.3, 20.0, 2), turn(20.3, 22.3, 2), turn(22.3, 23.3, 3), turn(23.3, 30.0, 1)];
+        let s = score(&found, &truth);
+        assert_eq!(s.speakers_found, 3);
+        assert_eq!(s.names, vec!["ana", "bia"]);
+        assert!((s.seconds[1].1[0] - 2.0).abs() < 1e-9 && (s.seconds[1].1[1] - 9.7).abs() < 1e-9, "{:?}", s.seconds);
+        // correct = ana→1 (16.7 s) + bia→2 (9.7 s) of 29.4 s
+        assert!((s.speech_correct - 26.4 / 29.4).abs() < 1e-9, "{}", s.speech_correct);
+        assert!(parse_truth("1 2").is_err());
+    }
+
+    /// Accuracy on a local fixture built with `fofoca-cli diarize-mix` (spec 022). Fixtures come
+    /// from private recordings and stay out of the repo:
+    /// `FOFOCA_DIAR_FIXTURE=<dir with mix.wav + truth.txt> cargo test -p fofoca-core -- --ignored accuracy`.
+    #[test]
+    #[ignore]
+    fn accuracy_on_a_local_fixture() {
+        let Ok(dir) = std::env::var("FOFOCA_DIAR_FIXTURE") else {
+            eprintln!("FOFOCA_DIAR_FIXTURE not set; nothing to check");
+            return;
+        };
+        let dir = Path::new(&dir);
+        let samples = crate::audio::read_wav(&dir.join("mix.wav")).unwrap();
+        let truth = parse_truth(&std::fs::read_to_string(dir.join("truth.txt")).unwrap()).unwrap();
+        let dc = crate::config::DiarizationConfig::default();
+        let opts = Options { threshold: dc.threshold, max_speakers: None, min_cluster_s: MIN_CLUSTER_S };
+        let t0 = std::time::Instant::now();
+        let turns = separate(&samples, &dc.segmentation_model, &dc.embedding_model, &opts).unwrap();
+        let took = t0.elapsed().as_secs_f64();
+        let s = score(&turns, &truth);
+        let audio_s = samples.len() as f64 / SAMPLE_RATE as f64;
+        eprintln!("{}: {} speakers (truth {}), speech correct {:.1}%, {took:.1}s for {audio_s:.0}s ({:.3}x)", dir.display(), s.speakers_found, s.names.len(), 100.0 * s.speech_correct, took / audio_s);
+        assert_eq!(s.speakers_found, s.names.len(), "{:?}", s.seconds);
+        assert!(s.speech_correct >= 0.9, "speech correct {:.1}%", 100.0 * s.speech_correct);
     }
 
     fn speakers(labels: &[u32]) -> usize {

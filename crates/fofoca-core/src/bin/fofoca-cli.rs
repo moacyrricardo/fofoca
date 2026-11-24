@@ -15,6 +15,11 @@
 //! fofoca-cli eval-notes <file.wav> <facts.json>
 //!                                           compare free-text summary vs grounded notes
 //! fofoca-cli diarize-wav <file.wav> [--threshold T] [--max N]   print speaker turns of a WAV
+//! fofoca-cli diarize-mix <out-dir> <name>=<file.wav> …
+//!                                           build a test call (mix.wav + truth.txt) from
+//!                                           single-speaker WAVs (spec 022)
+//! fofoca-cli diarize-score <mix.wav> <truth.txt> [--threshold T] [--max N]
+//!                                           speakers found vs truth and speech correct %
 //! fofoca-cli list [--label L]               list stored meetings (optionally only those labelled L)
 //! fofoca-cli labels                         known labels with meeting counts
 //! fofoca-cli import <file> [--title T] [--label L]… [--at RFC3339]
@@ -65,6 +70,8 @@ fn run() -> Result<()> {
         Some("transcribe") => transcribe(&cfg, args.get(1).context("usage: transcribe <file.wav>")?),
         Some("bench-latency") => bench_latency(&cfg, &args[1..]),
         Some("diarize-wav") => diarize_wav(&cfg, &args[1..]),
+        Some("diarize-mix") => diarize_mix(&cfg, &args[1..]),
+        Some("diarize-score") => diarize_score(&cfg, &args[1..]),
         Some("notes") => write_notes(&cfg, &store, args.get(1).context("usage: notes <meeting-id>")?),
         Some("eval-notes") => eval_notes(&cfg, &args[1..]),
         Some("diarize") => diarize_meeting(&cfg, &store, args.get(1).context("usage: diarize <meeting-id>")?),
@@ -186,15 +193,105 @@ fn diarize_meeting(cfg: &Config, store: &Store, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run speaker separation on a 16 kHz mono WAV and print the turns (for tuning, spec 003).
-fn diarize_wav(cfg: &Config, args: &[String]) -> Result<()> {
-    let path = args.first().context("usage: diarize-wav <file.wav> [--threshold T] [--max N]")?;
+/// `--threshold T` / `--max N` for the diarize-* tools; defaults: config threshold, no cap.
+fn diarize_options(cfg: &Config, args: &[String]) -> Result<fofoca_core::diarize::Options> {
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
-    let opts = fofoca_core::diarize::Options {
+    Ok(fofoca_core::diarize::Options {
         threshold: flag("--threshold").map(|s| s.parse()).transpose()?.unwrap_or(cfg.diarization.threshold),
         max_speakers: flag("--max").map(|s| s.parse()).transpose()?,
         min_cluster_s: fofoca_core::diarize::MIN_CLUSTER_S,
+    })
+}
+
+/// Build a test call from single-speaker WAVs (spec 022): each source's speech regions (from
+/// segmentation) are dealt out in blocks of 3–15 s, never the same speaker twice in a row when
+/// avoidable, with 0.3 s of silence after each region. Fixed seed, so the same inputs give the
+/// same mix.
+fn diarize_mix(cfg: &Config, args: &[String]) -> Result<()> {
+    const USAGE: &str = "usage: diarize-mix <out-dir> <name>=<file.wav> …";
+    let out = std::path::Path::new(args.first().context(USAGE)?);
+    anyhow::ensure!(args.len() >= 2, USAGE);
+    let mut sources = Vec::new();
+    for spec in &args[1..] {
+        let (name, wav) = spec.split_once('=').context(USAGE)?;
+        let samples = audio::read_wav(wav.as_ref())?;
+        let regions = fofoca_core::diarize::speech_regions(&samples, &cfg.diarization.segmentation_model)?;
+        let sr = SAMPLE_RATE as f64;
+        let pieces: Vec<Vec<i16>> = regions.iter().map(|&(a, b)| samples[(a * sr) as usize..((b * sr) as usize).min(samples.len())].to_vec()).collect();
+        eprintln!("{name}: {} regions, {:.1}s of speech", pieces.len(), regions.iter().map(|(a, b)| b - a).sum::<f64>());
+        sources.push((name.to_string(), pieces));
+    }
+    let (mix, truth) = build_mix(sources, 7);
+    std::fs::create_dir_all(out)?;
+    std::fs::write(out.join("mix.wav"), audio::wav_bytes(&mix))?;
+    let text: String = truth.iter().map(|t| format!("{:.2} {:.2} {}\n", t.start, t.end, t.name)).collect();
+    std::fs::write(out.join("truth.txt"), text)?;
+    eprintln!("{}: {:.1}s, {} turns", out.display(), mix.len() as f64 / SAMPLE_RATE as f64, truth.len());
+    Ok(())
+}
+
+/// The mixing of `diarize-mix`, without I/O. `sources` = (name, speech pieces in order).
+fn build_mix(mut sources: Vec<(String, Vec<Vec<i16>>)>, seed: u64) -> (Vec<i16>, Vec<fofoca_core::diarize::TruthTurn>) {
+    let mut state = seed;
+    // LCG, as in scripts/diarize_reference.py; uniform in [0, 1)
+    let mut uniform = move || {
+        state = (state * 1103515245 + 12345) % (1 << 31);
+        state as f64 / (1u64 << 31) as f64
     };
+    for (_, pieces) in &mut sources {
+        pieces.reverse(); // pop from the end = take in order
+    }
+    let gap = (0.3 * SAMPLE_RATE as f64) as usize;
+    let (mut mix, mut truth, mut last): (Vec<i16>, Vec<fofoca_core::diarize::TruthTurn>, Option<usize>) = (Vec::new(), Vec::new(), None);
+    loop {
+        let left: Vec<usize> = (0..sources.len()).filter(|&i| !sources[i].1.is_empty()).collect();
+        if left.is_empty() {
+            break;
+        }
+        let others: Vec<usize> = left.iter().copied().filter(|&i| Some(i) != last).collect();
+        let pool = if others.is_empty() { &left } else { &others };
+        let who = pool[((uniform() * pool.len() as f64) as usize).min(pool.len() - 1)];
+        last = Some(who);
+        let target = 3.0 + 12.0 * uniform();
+        let mut got = 0.0;
+        while got < target {
+            let Some(piece) = sources[who].1.pop() else { break };
+            let start = mix.len() as f64 / SAMPLE_RATE as f64;
+            let d = piece.len() as f64 / SAMPLE_RATE as f64;
+            mix.extend_from_slice(&piece);
+            truth.push(fofoca_core::diarize::TruthTurn { start, end: start + d, name: sources[who].0.clone() });
+            mix.resize(mix.len() + gap, 0);
+            got += d;
+        }
+    }
+    (mix, truth)
+}
+
+/// Run speaker separation on a test mix and score it against its truth (spec 022).
+fn diarize_score(cfg: &Config, args: &[String]) -> Result<()> {
+    const USAGE: &str = "usage: diarize-score <mix.wav> <truth.txt> [--threshold T] [--max N]";
+    let (wav, truth) = (args.first().context(USAGE)?, args.get(1).context(USAGE)?);
+    let opts = diarize_options(cfg, args)?;
+    let truth = fofoca_core::diarize::parse_truth(&std::fs::read_to_string(truth)?)?;
+    let samples = audio::read_wav(wav.as_ref())?;
+    let t0 = Instant::now();
+    let turns = fofoca_core::diarize::separate(&samples, &cfg.diarization.segmentation_model, &cfg.diarization.embedding_model, &opts)?;
+    let took = t0.elapsed().as_secs_f64();
+    let s = fofoca_core::diarize::score(&turns, &truth);
+    let audio_s = samples.len() as f64 / SAMPLE_RATE as f64;
+    println!("{} speakers found (truth {}), speech correct {:.1}%", s.speakers_found, s.names.len(), 100.0 * s.speech_correct);
+    println!("  speaker  {}", s.names.iter().map(|n| format!("{n:>9}")).collect::<String>());
+    for (speaker, row) in &s.seconds {
+        println!("  {speaker:7}  {}", row.iter().map(|v| format!("{v:8.1}s")).collect::<String>());
+    }
+    eprintln!("threshold {}, max {:?}; {took:.1}s for {audio_s:.1}s of audio ({:.3}x)", opts.threshold, opts.max_speakers, took / audio_s);
+    Ok(())
+}
+
+/// Run speaker separation on a 16 kHz mono WAV and print the turns (for tuning, spec 003).
+fn diarize_wav(cfg: &Config, args: &[String]) -> Result<()> {
+    let path = args.first().context("usage: diarize-wav <file.wav> [--threshold T] [--max N]")?;
+    let opts = diarize_options(cfg, args)?;
     let samples = audio::read_wav(path.as_ref())?;
     let t0 = Instant::now();
     let turns = fofoca_core::diarize::separate(&samples, &cfg.diarization.segmentation_model, &cfg.diarization.embedding_model, &opts)?;
@@ -526,4 +623,29 @@ fn calendar(args: &[String]) -> Result<()> {
 
 fn toml_pretty(cfg: &Config) -> Result<String> {
     Ok(toml::to_string_pretty(cfg)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mix_takes_turns_with_gaps_and_matching_truth() {
+        let sr = SAMPLE_RATE as usize;
+        // 4 one-second pieces each, so every block (3–15 s) is several pieces
+        let piece = |v: i16| vec![v; sr];
+        let sources = vec![("a".to_string(), vec![piece(1); 4]), ("b".to_string(), vec![piece(2); 4])];
+        let (mix, truth) = build_mix(sources.clone(), 7);
+        assert_eq!(truth.len(), 8);
+        assert_eq!(mix.len(), 8 * (sr + (0.3 * sr as f64) as usize));
+        for t in &truth {
+            let at = (t.start * sr as f64).round() as usize;
+            assert_eq!(mix[at], if t.name == "a" { 1 } else { 2 }, "{t:?}");
+            assert!((t.end - t.start - 1.0).abs() < 1e-9);
+        }
+        assert!(truth.windows(2).all(|w| w[1].start >= w[0].end + 0.299));
+        assert!(truth.iter().any(|t| t.name == "a") && truth.iter().any(|t| t.name == "b"));
+        // fixed seed: same inputs, same mix
+        assert_eq!(build_mix(sources, 7).1, truth);
+    }
 }
