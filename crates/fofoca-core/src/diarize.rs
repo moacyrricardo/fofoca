@@ -75,30 +75,45 @@ fn session(path: &Path, optimization: GraphOptimizationLevel) -> Result<Session>
         .with_context(|| format!("loading {}", path.display()))
 }
 
+// segmentation-3.0 framing, as in pyannote-rs: 10 s windows, first frame at sample 721, one frame
+// per 270 samples; output = 7 powerset classes per frame (0 = nobody speaks).
+const SEG_WINDOW: usize = SAMPLE_RATE as usize * 10;
+const SEG_FIRST: usize = 721;
+const SEG_FRAME: usize = 270;
+
+/// Start of frame `frame` of segmentation window `window`, in seconds. Frames restart at each
+/// window: a window holds 589 frames × 270 = 159 030 samples, not 160 000, so numbering them
+/// globally drifts 60.6 ms per window (spec 022).
+fn frame_time(window: usize, frame: usize) -> f64 {
+    (window * SEG_WINDOW + SEG_FIRST + frame * SEG_FRAME) as f64 / SAMPLE_RATE as f64
+}
+
 /// Speech regions `(start_s, end_s)` from segmentation-3.0, split at speaker-class changes.
 fn speech_regions(samples: &[i16], model: &Path) -> Result<Vec<(f64, f64)>> {
-    // segmentation-3.0 framing, as in pyannote-rs: 10 s windows, first frame at sample 721,
-    // one frame per 270 samples; output = 7 powerset classes per frame (0 = nobody speaks).
-    const FRAME: usize = 270;
-    const FIRST: usize = 721;
-    let window = SAMPLE_RATE as usize * 10;
     // segmentation-3.0 is unaffected by the optimizer (identical regions either way).
     let mut sess = session(model, GraphOptimizationLevel::Level3)?;
     let mut padded = samples.to_vec();
-    padded.resize(samples.len().div_ceil(window).max(1) * window, 0);
+    padded.resize(samples.len().div_ceil(SEG_WINDOW).max(1) * SEG_WINDOW, 0);
 
     let mut classes: Vec<usize> = Vec::new();
-    for chunk in padded.chunks(window) {
+    let mut positions: Vec<(usize, usize)> = Vec::new(); // (window, frame in window) per class
+    for (w, chunk) in padded.chunks(SEG_WINDOW).enumerate() {
         let input = Array1::from_iter(chunk.iter().map(|&x| x as f32)).insert_axis(Axis(0)).insert_axis(Axis(0));
         let out = sess.run(ort::inputs![TensorRef::from_array_view(input.view().into_dyn())?])?;
         let (shape, data) = out.get("output").context("segmentation output")?.try_extract_tensor::<f32>()?;
         let n_classes = *shape.last().context("segmentation shape")? as usize;
-        for frame in data.chunks(n_classes) {
+        for (f, frame) in data.chunks(n_classes).enumerate() {
             let best = frame.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0);
             classes.push(best);
+            positions.push((w, f));
         }
     }
-    let time = |frame: usize| ((FIRST + frame * FRAME) as f64 / SAMPLE_RATE as f64).min(samples.len() as f64 / SAMPLE_RATE as f64);
+    let audio_s = samples.len() as f64 / SAMPLE_RATE as f64;
+    // `regions_from_classes` asks for one past the last frame as an end time
+    let time = |i: usize| {
+        let (w, f) = positions.get(i).copied().unwrap_or_else(|| positions.last().map_or((0, 0), |&(w, f)| (w, f + 1)));
+        frame_time(w, f).min(audio_s)
+    };
     Ok(regions_from_classes(&classes, time))
 }
 
@@ -240,6 +255,19 @@ mod tests {
         assert_eq!(r[1].0, 2.5);
         assert!((r[1].1 - 4.2).abs() < 1e-9, "blip merged: {r:?}");
         assert_eq!(r[3], (5.7, 6.7));
+    }
+
+    #[test]
+    fn frame_time_restarts_at_each_window() {
+        assert_eq!(frame_time(0, 0), 721.0 / 16000.0);
+        assert_eq!(frame_time(3, 0), 30.0 + 721.0 / 16000.0);
+        // regression: global numbering put window 3 frame 0 at frame 3×589, 181.8 ms early
+        assert!(frame_time(3, 0) - (721 + 3 * 589 * 270) as f64 / 16000.0 > 0.18);
+        // never runs backwards across a window boundary
+        for w in 0..10 {
+            assert!(frame_time(w + 1, 0) > frame_time(w, 588));
+            assert!(frame_time(w, 1) > frame_time(w, 0));
+        }
     }
 
     #[test]
