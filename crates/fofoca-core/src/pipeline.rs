@@ -150,8 +150,9 @@ pub fn separate_speakers(store: &Store, cfg: &Config, id: &str) -> Result<StepRe
     }
     let t0 = Instant::now();
     let samples = audio::read_wav(&wav)?;
-    let meta = store.load(id)?.meta;
-    let opts = diarize::Options { threshold: dc.threshold, max_speakers: (meta.attendees.len() + 1).max(4) };
+    // No speaker cap: the attendee-based one was unreliable and its floor of 4 hid bad clustering
+    // (spec 022). Small clusters are folded instead.
+    let opts = diarize::Options { threshold: dc.threshold, max_speakers: None, min_cluster_s: diarize::MIN_CLUSTER_S };
     let turns = diarize::separate(&samples, &dc.segmentation_model, &dc.embedding_model, &opts)?;
     let segments = speakers::assign(&store.base_transcript(id)?, &turns);
     let roster = speakers::roster(&segments, &store.speakers(id));

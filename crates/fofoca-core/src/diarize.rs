@@ -29,10 +29,17 @@ pub struct Turn {
 }
 
 pub struct Options {
-    /// Cosine similarity above which two clusters are the same person.
+    /// Cosine similarity above which two clusters are the same person. Agglomeration stops here.
     pub threshold: f32,
-    pub max_speakers: usize,
+    /// Cap on speakers, applied only after small clusters are folded in. `None` = no cap.
+    pub max_speakers: Option<usize>,
+    /// A cluster with less speech than `min(min_cluster_s, 10 % of all embedded speech)` is folded
+    /// into the nearest larger one. Normally [`MIN_CLUSTER_S`].
+    pub min_cluster_s: f64,
 }
+
+/// Default minimum speech (seconds) for a cluster to stand as its own speaker (spec 022).
+pub const MIN_CLUSTER_S: f64 = 10.0;
 
 /// Turns shorter than this get no embedding of their own (too little voice to identify); they
 /// take the speaker of the nearest identified turn.
@@ -45,7 +52,7 @@ pub fn separate(samples: &[i16], segmentation_model: &Path, embedding_model: &Pa
     if regions.is_empty() {
         return Ok(Vec::new());
     }
-    let mut embedder = session(embedding_model)?;
+    let mut embedder = embedding_session(embedding_model)?;
     let mut embeddings: Vec<Option<Vec<f32>>> = Vec::with_capacity(regions.len());
     for &(start, end) in &regions {
         let e = if end - start >= MIN_EMBED_S {
@@ -57,44 +64,69 @@ pub fn separate(samples: &[i16], segmentation_model: &Path, embedding_model: &Pa
         };
         embeddings.push(e);
     }
-    let labels = cluster(&embeddings, opts);
+    let durations: Vec<f64> = regions.iter().map(|&(start, end)| end - start).collect();
+    let labels = cluster(&embeddings, &durations, opts);
     Ok(regions.iter().zip(labels).map(|(&(start, end), speaker)| Turn { start, end, speaker }).collect())
 }
 
-fn session(path: &Path) -> Result<Session> {
+/// The WeSpeaker CAM++ session, with graph optimization OFF (spec 022): the ONNX Runtime bundled
+/// with ort 2.0.0-rc.10 corrupts this model at any level ≥ Level1 (norm ~150 vectors, cosine ≈ 0
+/// to the right embedding). Re-run the golden-embedding test before re-enabling it after an `ort`
+/// upgrade.
+fn embedding_session(path: &Path) -> Result<Session> {
+    session(path, GraphOptimizationLevel::Disable)
+}
+
+fn session(path: &Path, optimization: GraphOptimizationLevel) -> Result<Session> {
     if !path.exists() {
         bail!("model not found: {}", path.display());
     }
     Session::builder()?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_optimization_level(optimization)?
         .with_intra_threads(4)?
         .commit_from_file(path)
         .with_context(|| format!("loading {}", path.display()))
 }
 
+// segmentation-3.0 framing, as in pyannote-rs: 10 s windows, first frame at sample 721, one frame
+// per 270 samples; output = 7 powerset classes per frame (0 = nobody speaks).
+const SEG_WINDOW: usize = SAMPLE_RATE as usize * 10;
+const SEG_FIRST: usize = 721;
+const SEG_FRAME: usize = 270;
+
+/// Start of frame `frame` of segmentation window `window`, in seconds. Frames restart at each
+/// window: a window holds 589 frames × 270 = 159 030 samples, not 160 000, so numbering them
+/// globally drifts 60.6 ms per window (spec 022).
+fn frame_time(window: usize, frame: usize) -> f64 {
+    (window * SEG_WINDOW + SEG_FIRST + frame * SEG_FRAME) as f64 / SAMPLE_RATE as f64
+}
+
 /// Speech regions `(start_s, end_s)` from segmentation-3.0, split at speaker-class changes.
-fn speech_regions(samples: &[i16], model: &Path) -> Result<Vec<(f64, f64)>> {
-    // segmentation-3.0 framing, as in pyannote-rs: 10 s windows, first frame at sample 721,
-    // one frame per 270 samples; output = 7 powerset classes per frame (0 = nobody speaks).
-    const FRAME: usize = 270;
-    const FIRST: usize = 721;
-    let window = SAMPLE_RATE as usize * 10;
-    let mut sess = session(model)?;
+pub fn speech_regions(samples: &[i16], model: &Path) -> Result<Vec<(f64, f64)>> {
+    // segmentation-3.0 is unaffected by the optimizer (identical regions either way).
+    let mut sess = session(model, GraphOptimizationLevel::Level3)?;
     let mut padded = samples.to_vec();
-    padded.resize(samples.len().div_ceil(window).max(1) * window, 0);
+    padded.resize(samples.len().div_ceil(SEG_WINDOW).max(1) * SEG_WINDOW, 0);
 
     let mut classes: Vec<usize> = Vec::new();
-    for chunk in padded.chunks(window) {
+    let mut positions: Vec<(usize, usize)> = Vec::new(); // (window, frame in window) per class
+    for (w, chunk) in padded.chunks(SEG_WINDOW).enumerate() {
         let input = Array1::from_iter(chunk.iter().map(|&x| x as f32)).insert_axis(Axis(0)).insert_axis(Axis(0));
         let out = sess.run(ort::inputs![TensorRef::from_array_view(input.view().into_dyn())?])?;
         let (shape, data) = out.get("output").context("segmentation output")?.try_extract_tensor::<f32>()?;
         let n_classes = *shape.last().context("segmentation shape")? as usize;
-        for frame in data.chunks(n_classes) {
+        for (f, frame) in data.chunks(n_classes).enumerate() {
             let best = frame.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0);
             classes.push(best);
+            positions.push((w, f));
         }
     }
-    let time = |frame: usize| ((FIRST + frame * FRAME) as f64 / SAMPLE_RATE as f64).min(samples.len() as f64 / SAMPLE_RATE as f64);
+    let audio_s = samples.len() as f64 / SAMPLE_RATE as f64;
+    // `regions_from_classes` asks for one past the last frame as an end time
+    let time = |i: usize| {
+        let (w, f) = positions.get(i).copied().unwrap_or_else(|| positions.last().map_or((0, 0), |&(w, f)| (w, f + 1)));
+        frame_time(w, f).min(audio_s)
+    };
     Ok(regions_from_classes(&classes, time))
 }
 
@@ -151,15 +183,34 @@ fn normalize(v: &[f32]) -> Vec<f32> {
     v.iter().map(|x| x / n).collect()
 }
 
-/// Average-linkage agglomerative clustering on cosine similarity. Regions without an embedding
-/// take the label of the nearest region (by index, i.e. time) that has one. Labels are 1-based in
-/// order of first appearance.
-fn cluster(embeddings: &[Option<Vec<f32>>], opts: &Options) -> Vec<u32> {
+fn sim(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// The most similar pair `(i, j, similarity)` with `i < j` under `score`; `None` if fewer than 2.
+fn most_similar_pair(n: usize, score: impl Fn(usize, usize) -> f32) -> Option<(usize, usize, f32)> {
+    let mut best: Option<(usize, usize, f32)> = None;
+    for i in 0..n {
+        for j in i + 1..n {
+            let s = score(i, j);
+            if best.is_none_or(|b| s > b.2) {
+                best = Some((i, j, s));
+            }
+        }
+    }
+    best
+}
+
+/// Average-linkage agglomerative clustering on cosine similarity, stopping at the threshold; then
+/// small clusters are folded into the nearest large one, then the optional speaker cap merges
+/// large clusters (spec 022). `durations` are the regions' lengths in seconds. Regions without an
+/// embedding take the label of the nearest region (by index, i.e. time) that has one. Labels are
+/// 1-based in order of first appearance.
+fn cluster(embeddings: &[Option<Vec<f32>>], durations: &[f64], opts: &Options) -> Vec<u32> {
     let items: Vec<(usize, Vec<f32>)> = embeddings.iter().enumerate().filter_map(|(i, e)| e.as_ref().map(|e| (i, normalize(e)))).collect();
     if items.is_empty() {
         return vec![1; embeddings.len()];
     }
-    let sim = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
     // clusters as lists of item indices; pairwise average similarity recomputed (n is small)
     let mut clusters: Vec<Vec<usize>> = (0..items.len()).map(|i| vec![i]).collect();
     let avg = |a: &[usize], b: &[usize]| {
@@ -171,23 +222,50 @@ fn cluster(embeddings: &[Option<Vec<f32>>], opts: &Options) -> Vec<u32> {
         }
         s / (a.len() * b.len()) as f32
     };
-    loop {
-        let mut best = (0, 0, f32::MIN);
-        for i in 0..clusters.len() {
-            for j in i + 1..clusters.len() {
-                let s = avg(&clusters[i], &clusters[j]);
-                if s > best.2 {
-                    best = (i, j, s);
-                }
-            }
-        }
-        let too_many = clusters.len() > opts.max_speakers.max(1);
-        if clusters.len() < 2 || (best.2 < opts.threshold && !too_many) {
+    // no forced merges here: a cap applied during agglomeration glues real speakers together
+    // while short noisy clusters stay apart
+    while let Some((i, j, s)) = most_similar_pair(clusters.len(), |i, j| avg(&clusters[i], &clusters[j])) {
+        if s < opts.threshold {
             break;
         }
-        let merged = clusters.remove(best.1);
-        clusters[best.0].extend(merged);
+        let merged = clusters.remove(j);
+        clusters[i].extend(merged);
     }
+
+    // minimum cluster size: fold each region of a small cluster into the most similar large one
+    let speech = |c: &[usize]| c.iter().map(|&m| durations[items[m].0]).sum::<f64>();
+    let total: f64 = items.iter().map(|(i, _)| durations[*i]).sum();
+    let min_s = opts.min_cluster_s.min(0.1 * total);
+    let (mut large, mut small): (Vec<Vec<usize>>, Vec<Vec<usize>>) = clusters.into_iter().partition(|c| speech(c) >= min_s);
+    if large.is_empty() {
+        let k = (0..small.len()).max_by(|&a, &b| speech(&small[a]).total_cmp(&speech(&small[b]))).unwrap_or(0);
+        large.push(small.remove(k));
+    }
+    let centroid = |c: &[usize]| {
+        let mut m = vec![0.0f32; items[c[0]].1.len()];
+        for &i in c {
+            for (x, y) in m.iter_mut().zip(&items[i].1) {
+                *x += y;
+            }
+        }
+        normalize(&m)
+    };
+    let centroids: Vec<Vec<f32>> = large.iter().map(|c| centroid(c)).collect();
+    for m in small.into_iter().flatten() {
+        let k = (0..large.len()).max_by(|&a, &b| sim(&items[m].1, &centroids[a]).total_cmp(&sim(&items[m].1, &centroids[b]))).unwrap_or(0);
+        large[k].push(m);
+    }
+
+    // speaker cap, after cleanup only
+    if let Some(n) = opts.max_speakers {
+        while large.len() > n.max(1) {
+            let cs: Vec<Vec<f32>> = large.iter().map(|c| centroid(c)).collect();
+            let Some((i, j, _)) = most_similar_pair(large.len(), |i, j| sim(&cs[i], &cs[j])) else { break };
+            let merged = large.remove(j);
+            large[i].extend(merged);
+        }
+    }
+    let clusters = large;
     let mut label_of_item = vec![0usize; items.len()];
     for (c, members) in clusters.iter().enumerate() {
         for &m in members {
@@ -211,6 +289,77 @@ fn cluster(embeddings: &[Option<Vec<f32>>], opts: &Options) -> Vec<u32> {
             pos as u32 + 1
         })
         .collect()
+}
+
+/// A stretch of a known speaker in an accuracy fixture (`truth.txt`: `start end name` per line).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruthTurn {
+    pub start: f64,
+    pub end: f64,
+    pub name: String,
+}
+
+pub fn parse_truth(text: &str) -> Result<Vec<TruthTurn>> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let mut p = l.split_whitespace();
+            let (Some(a), Some(b), Some(name)) = (p.next(), p.next(), p.next()) else { bail!("truth line needs `start end name`: {l}") };
+            Ok(TruthTurn { start: a.parse()?, end: b.parse()?, name: name.to_string() })
+        })
+        .collect()
+}
+
+/// How well found turns match known ones.
+#[derive(Debug, PartialEq)]
+pub struct Score {
+    /// Distinct speakers in the found turns.
+    pub speakers_found: usize,
+    /// Distinct truth names, sorted.
+    pub names: Vec<String>,
+    /// Share (0..=1) of overlapping speech given to the right person after the best one-to-one
+    /// mapping of found speakers to names (greedy, largest overlap first).
+    pub speech_correct: f64,
+    /// Per found speaker, sorted: seconds overlapping each of `names`.
+    pub seconds: Vec<(u32, Vec<f64>)>,
+}
+
+/// Score found turns against truth (spec 022 accuracy tools).
+pub fn score(turns: &[Turn], truth: &[TruthTurn]) -> Score {
+    let mut names: Vec<String> = truth.iter().map(|t| t.name.clone()).collect();
+    names.sort();
+    names.dedup();
+    let mut found: Vec<u32> = turns.iter().map(|t| t.speaker).collect();
+    found.sort();
+    found.dedup();
+    let mut seconds: Vec<(u32, Vec<f64>)> = found.iter().map(|&s| (s, vec![0.0; names.len()])).collect();
+    for t in turns {
+        let row = found.binary_search(&t.speaker).unwrap_or_default();
+        for r in truth {
+            let overlap = t.end.min(r.end) - t.start.max(r.start);
+            if overlap > 0.0 {
+                let col = names.binary_search(&r.name).unwrap_or_default();
+                seconds[row].1[col] += overlap;
+            }
+        }
+    }
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for (h, (_, row)) in seconds.iter().enumerate() {
+        for (n, &v) in row.iter().enumerate() {
+            pairs.push((v, h, n));
+        }
+    }
+    pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let (mut used_h, mut used_n, mut correct) = (vec![false; seconds.len()], vec![false; names.len()], 0.0);
+    for (v, h, n) in pairs {
+        if !used_h[h] && !used_n[n] {
+            used_h[h] = true;
+            used_n[n] = true;
+            correct += v;
+        }
+    }
+    let total: f64 = seconds.iter().flat_map(|(_, r)| r).sum();
+    Score { speakers_found: found.len(), names, speech_correct: if total > 0.0 { correct / total } else { 0.0 }, seconds }
 }
 
 #[cfg(test)]
@@ -239,20 +388,147 @@ mod tests {
     }
 
     #[test]
+    fn frame_time_restarts_at_each_window() {
+        assert_eq!(frame_time(0, 0), 721.0 / 16000.0);
+        assert_eq!(frame_time(3, 0), 30.0 + 721.0 / 16000.0);
+        // regression: global numbering put window 3 frame 0 at frame 3×589, 181.8 ms early
+        assert!(frame_time(3, 0) - (721 + 3 * 589 * 270) as f64 / 16000.0 > 0.18);
+        // never runs backwards across a window boundary
+        for w in 0..10 {
+            assert!(frame_time(w + 1, 0) > frame_time(w, 588));
+            assert!(frame_time(w, 1) > frame_time(w, 0));
+        }
+    }
+
+    #[test]
     fn clustering_groups_similar_voices() {
         let a = Some(vec![1.0, 0.1, 0.0]);
         let a2 = Some(vec![0.9, 0.2, 0.0]);
         let b = Some(vec![0.0, 1.0, 0.1]);
         let b2 = Some(vec![0.1, 0.9, 0.0]);
-        let opts = Options { threshold: 0.5, max_speakers: 6 };
+        let opts = Options { threshold: 0.5, max_speakers: None, min_cluster_s: MIN_CLUSTER_S };
         // a short region without embedding takes its nearest neighbour's label
-        assert_eq!(cluster(&[a.clone(), b.clone(), None, b2.clone(), a2.clone()], &opts), vec![1, 2, 2, 2, 1]);
-        // max_speakers forces merging
-        let c = Some(vec![0.0, 0.0, 1.0]);
-        let opts1 = Options { threshold: 0.99, max_speakers: 2 };
-        let labels = cluster(&[a, b, c], &opts1);
-        assert_eq!(labels.iter().collect::<std::collections::HashSet<_>>().len(), 2);
+        assert_eq!(cluster(&[a.clone(), b.clone(), None, b2.clone(), a2.clone()], &[5.0, 5.0, 0.5, 5.0, 5.0], &opts), vec![1, 2, 2, 2, 1]);
         // nothing embedded: everyone is speaker 1
-        assert_eq!(cluster(&[None, None], &opts), vec![1, 1]);
+        assert_eq!(cluster(&[None, None], &[0.5, 0.5], &opts), vec![1, 1]);
+    }
+
+    /// The fixed 3 s input of the golden test. Must match `test_input()` in
+    /// `scripts/diarize_reference.py`.
+    fn golden_input() -> Vec<i16> {
+        let mut s: u64 = 22;
+        (0..SAMPLE_RATE as usize * 3)
+            .map(|n| {
+                let t = n as f64 / SAMPLE_RATE as f64;
+                s = (s * 1103515245 + 12345) % (1 << 31);
+                let u = s as f64 / (1u64 << 31) as f64;
+                let tau = 2.0 * std::f64::consts::PI;
+                let v = 3000.0 * (tau * 220.0 * t).sin() + 2000.0 * (tau * 440.0 * t + 0.5).sin() + 1000.0 * (tau * 1234.0 * t).sin() + 2000.0 * (u - 0.5);
+                (v + 0.5).floor().clamp(-32768.0, 32767.0) as i16
+            })
+            .collect()
+    }
+
+    /// Guards against a broken embedding passing silently (spec 022: ort's optimizer corrupted
+    /// CAM++, cosine ≈ 0). Needs the local model:
+    /// `cargo test -p fofoca-core -- --ignored embedding_matches`. Regenerate the reference with
+    /// `scripts/diarize_reference.py`.
+    #[test]
+    #[ignore]
+    fn embedding_matches_the_python_reference() {
+        let model = crate::config::DiarizationConfig::default().embedding_model;
+        let reference: serde_json::Value = serde_json::from_str(include_str!("../tests/data/campp_reference.json")).unwrap();
+        let expected: Vec<f32> = reference["embedding"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect();
+        let mut sess = embedding_session(&model).unwrap();
+        let got = embed(&mut sess, &golden_input()).unwrap();
+        assert_eq!(got.len(), expected.len());
+        let cos = sim(&normalize(&got), &normalize(&expected));
+        let norm = got.iter().map(|x| x * x).sum::<f32>().sqrt();
+        eprintln!("cosine {cos:.6}, norm {norm:.4} (reference {})", reference["norm"]);
+        assert!(cos >= 0.999, "embedding drifted from the onnxruntime reference: cosine {cos}");
+    }
+
+    #[test]
+    fn scoring_maps_speakers_one_to_one() {
+        let truth = parse_truth("0 10 ana\n10.3 20 bia\n\n20.3 30 ana\n").unwrap();
+        assert_eq!(truth[1], TruthTurn { start: 10.3, end: 20.0, name: "bia".into() });
+        let turn = |start, end, speaker| Turn { start, end, speaker };
+        // speaker 1 = ana, speaker 2 = bia but also grabs 2 s of ana, speaker 3 = 1 s of ana
+        let found = [turn(0.0, 10.0, 1), turn(10.3, 20.0, 2), turn(20.3, 22.3, 2), turn(22.3, 23.3, 3), turn(23.3, 30.0, 1)];
+        let s = score(&found, &truth);
+        assert_eq!(s.speakers_found, 3);
+        assert_eq!(s.names, vec!["ana", "bia"]);
+        assert!((s.seconds[1].1[0] - 2.0).abs() < 1e-9 && (s.seconds[1].1[1] - 9.7).abs() < 1e-9, "{:?}", s.seconds);
+        // correct = ana→1 (16.7 s) + bia→2 (9.7 s) of 29.4 s
+        assert!((s.speech_correct - 26.4 / 29.4).abs() < 1e-9, "{}", s.speech_correct);
+        assert!(parse_truth("1 2").is_err());
+    }
+
+    /// Accuracy on a local fixture built with `fofoca-cli diarize-mix` (spec 022). Fixtures come
+    /// from private recordings and stay out of the repo:
+    /// `FOFOCA_DIAR_FIXTURE=<dir with mix.wav + truth.txt> cargo test -p fofoca-core -- --ignored accuracy`.
+    #[test]
+    #[ignore]
+    fn accuracy_on_a_local_fixture() {
+        let Ok(dir) = std::env::var("FOFOCA_DIAR_FIXTURE") else {
+            eprintln!("FOFOCA_DIAR_FIXTURE not set; nothing to check");
+            return;
+        };
+        let dir = Path::new(&dir);
+        let samples = crate::audio::read_wav(&dir.join("mix.wav")).unwrap();
+        let truth = parse_truth(&std::fs::read_to_string(dir.join("truth.txt")).unwrap()).unwrap();
+        let dc = crate::config::DiarizationConfig::default();
+        let opts = Options { threshold: dc.threshold, max_speakers: None, min_cluster_s: MIN_CLUSTER_S };
+        let t0 = std::time::Instant::now();
+        let turns = separate(&samples, &dc.segmentation_model, &dc.embedding_model, &opts).unwrap();
+        let took = t0.elapsed().as_secs_f64();
+        let s = score(&turns, &truth);
+        let audio_s = samples.len() as f64 / SAMPLE_RATE as f64;
+        eprintln!("{}: {} speakers (truth {}), speech correct {:.1}%, {took:.1}s for {audio_s:.0}s ({:.3}x)", dir.display(), s.speakers_found, s.names.len(), 100.0 * s.speech_correct, took / audio_s);
+        assert_eq!(s.speakers_found, s.names.len(), "{:?}", s.seconds);
+        assert!(s.speech_correct >= 0.9, "speech correct {:.1}%", 100.0 * s.speech_correct);
+    }
+
+    fn speakers(labels: &[u32]) -> usize {
+        labels.iter().collect::<std::collections::HashSet<_>>().len()
+    }
+
+    #[test]
+    fn small_clusters_fold_into_the_nearest_large_one() {
+        let a = Some(vec![1.0, 0.1, 0.0]);
+        let a2 = Some(vec![0.9, 0.2, 0.0]);
+        let b = Some(vec![0.0, 1.0, 0.1]);
+        let b2 = Some(vec![0.1, 0.9, 0.0]);
+        // far from both groups (below the threshold), but nearer to A
+        let odd = Some(vec![0.3, 0.0, 1.0]);
+        let regions = [a, b, odd, b2, a2];
+        let durations = [8.0, 8.0, 1.0, 8.0, 8.0];
+        let opts = Options { threshold: 0.4, max_speakers: None, min_cluster_s: MIN_CLUSTER_S };
+        assert_eq!(cluster(&regions, &durations, &opts), vec![1, 2, 1, 2, 1]);
+        // the cap applies after cleanup
+        let capped = Options { max_speakers: Some(1), ..opts };
+        assert_eq!(cluster(&regions, &durations, &capped), vec![1; 5]);
+    }
+
+    #[test]
+    fn no_forced_merges_without_a_cap() {
+        // regression: the old max_speakers forced merges during agglomeration
+        let v = |x: f32, y: f32, z: f32| Some(vec![x, y, z]);
+        let regions = [v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), v(0.0, 0.0, 1.0), v(0.7, 0.7, 0.0)];
+        let opts = Options { threshold: 1.01, max_speakers: None, min_cluster_s: 0.0 };
+        assert_eq!(cluster(&regions, &[5.0; 4], &opts), vec![1, 2, 3, 4]);
+        // with a cap of 2, only centroids merge: the two most similar first
+        let opts2 = Options { max_speakers: Some(2), ..opts };
+        assert_eq!(speakers(&cluster(&regions, &[5.0; 4], &opts2)), 2);
+    }
+
+    #[test]
+    fn when_no_cluster_is_large_the_biggest_one_keeps_everyone() {
+        // 12 orthogonal voices of 1 s each: every cluster holds 1/12 < 10 % of the speech
+        let regions: Vec<Option<Vec<f32>>> = (0..12).map(|i| Some((0..12).map(|j| if i == j { 1.0 } else { 0.0 }).collect())).collect();
+        let mut durations = vec![1.0; 12];
+        durations[5] = 1.05;
+        let opts = Options { threshold: 0.4, max_speakers: None, min_cluster_s: MIN_CLUSTER_S };
+        assert_eq!(cluster(&regions, &durations, &opts), vec![1; 12]);
     }
 }
