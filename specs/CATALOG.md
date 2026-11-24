@@ -21,4 +21,4 @@
 | 017 | done   | tray-and-icon               | moacyrricardo/spec-017-tray-and-icon-build | —     | icon without white corners; tray start/stop + show/hide |
 | 018 | todo   | per-track-transcription     | —                                        | —     | mic and call transcribed separately; replaces mix + loudness guess |
 | 020 | done   | postcall-transcript         | moacyrricardo/spec-020-postcall-transcript-build | —     | after the call: mic and call transcribed separately; live kept; re-run button; imports same path |
-| 022 | doing  | diarization-fixes           | moacyrricardo/spec-022-diarization-fixes-build | —     | ort optimizer corrupts CAM++ embeddings; segmentation timing drift; small-cluster cleanup, no forced merges, threshold 0.4 |
+| 022 | done   | diarization-fixes           | moacyrricardo/spec-022-diarization-fixes-build | —     | ort optimizer corrupts CAM++ embeddings; segmentation timing drift; small-cluster cleanup, no forced merges, threshold 0.4 |

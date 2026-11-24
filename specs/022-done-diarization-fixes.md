@@ -1,4 +1,4 @@
-Status: doing
+Status: done
 Branch: moacyrricardo/spec-022-diarization-fixes-build
 
 # 022 — Diarization fixes: embeddings, timing, cluster cleanup
@@ -151,3 +151,60 @@ speaker) and the daily 2026-11-24-102202 (expect 4). Report the numbers in Imple
   less cleanly than mic vs call (same-speaker 0.48 vs different-speaker 0.25 cosine, against 0.54
   vs 0.11). Expect occasional mistakes between similar remote voices.
 - **Attendee-based speaker cap** from the calendar invite stays out of scope, as in 020.
+
+## Implementation Notes
+
+Built as specified on `moacyrricardo/spec-022-diarization-fixes-build`, stacked on the spec PR
+(#31). Differences and decisions:
+
+- **Embedding session.** `embedding_session()` holds the `Disable` setting and the comment.
+  `separate()` and the golden test both call it, so the test checks the session the pipeline
+  actually uses. With `Level3` restored as a probe, the golden test fails at cosine 0.08 (norm
+  146). With `Disable` it passes at cosine 1.000000 (norm 25.1958).
+- **Frame timing.** `frame_time(w, f)` is pure, and `speech_regions` stores `(window, frame)` per
+  class entry. A region's end time "one past the last frame" uses the next frame of the last
+  window. `speech_regions` is now `pub` (used by `diarize-mix`).
+- **Clustering.** As specified. Centroids are the mean of normalized embeddings, then normalized
+  again, so "most similar" is a true cosine. `MIN_CLUSTER_S = 10.0` is a `pub const`, and callers
+  pass it in `Options`. `cluster()` now takes region durations. `diarize-wav --max` now defaults
+  to no cap (it was 8).
+- **Config.** The default is 0.4. A new test checks that a file without `[diarization]` reads 0.4
+  and that an explicit value is kept. 003 got inline "since 022" notes rather than a rewrite.
+- **Golden reference.** `scripts/diarize_reference.py` writes
+  `crates/fofoca-core/tests/data/campp_reference.json` (512 floats, input description,
+  onnxruntime version, norm). The input's seeded noise is an LCG (`s = (s·1103515245 + 12345)
+  mod 2³¹`, seed 22) that Rust and Python both implement.
+- **Accuracy tools.** `diarize-mix` deals out each source's segmentation regions in 3–15 s blocks
+  with 0.3 s gaps (seed 7, same LCG). It avoids the same speaker twice in a row when possible
+  and keeps every region. `diarize-score` also prints timing. "Speech correct" counts found speech
+  that overlaps truth (missed speech isn't penalized), as in the prototype. The accuracy test
+  passes with nothing to check when `FOFOCA_DIAR_FIXTURE` is unset.
+
+### Measurements (release build, i7-10510U)
+
+| | Speakers | Speech correct | Time |
+|---|---|---|---|
+| Mix: 3 voices, 592 s | 3 (truth 3) | 94.3% | 9.0–9.7 s (0.015×) |
+| Mix: 2 call voices, 359 s | 2 (truth 2) | 94.7% | 5.0–5.5 s (0.014×) |
+| Mix built with `diarize-mix` from the 1:1's mic + call, 381 s | 2 (truth 2) | 95.1% | 7.2 s |
+| Real 1:1, 2026-11-23-143243 (expect 1) | **1** | – | 3.4 s for 452 s |
+| Real daily, 2026-11-24-102202 (expect 4) | **3** | – | 31.7 s for 2105 s (0.015×) |
+
+Threshold sweep: the 3-voice mix is the same at 0.3–0.5. The 2-voice mix collapses to 1 speaker
+(58%) at 0.3 and is the same at 0.4–0.6. The 1:1 gives 1 at 0.4 and 0.5. The daily gives
+0.3 / 0.4 / 0.45 → 3, 0.5 → 4, 0.6 → 6.
+
+**Correction to Context:** the daily comes out as **3 at 0.4, not 4**. The Python prototype
+(`recluster.py`) with this spec's exact rule (drift-corrected regions, min(10 s, 10%), 0.4) also
+gives 3 (547 / 581 / 80 s), so the Rust port matches it. The "4" came from a different prototype
+setting (a 5 s minimum gives 7). At 0.5, a 34 s cluster splits off the largest speaker. Without
+labels for the daily, it's unknown whether that is the real 4th person. The default stays at
+0.4 as decided. Deferred: label a multi-person call and choose between 0.4 and 0.5 (and the
+min-cluster rule) on it, or move to VBx/PLDA (Known Gaps).
+
+### Change division
+No `CONTRIBUTING.md`, so I followed the CLAUDE.md conventions. One PR, stacked on the spec PR,
+with one concern per commit: status flip → embedding opt level → frame timing → clustering +
+threshold default (with the 003 note) → golden test → accuracy tools → this finish commit. Each
+commit built and passed tests before it was pushed. No API Diff: `fofoca-core` is consumed only
+inside the workspace (no API modules).
