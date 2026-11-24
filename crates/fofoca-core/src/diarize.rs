@@ -52,10 +52,7 @@ pub fn separate(samples: &[i16], segmentation_model: &Path, embedding_model: &Pa
     if regions.is_empty() {
         return Ok(Vec::new());
     }
-    // Graph optimization OFF for CAM++ (spec 022): the ONNX Runtime bundled with ort 2.0.0-rc.10
-    // corrupts this model at any level ≥ Level1 (norm ~150 vectors, cosine ≈ 0 to the right
-    // embedding). Re-run the golden-embedding test before re-enabling it after an `ort` upgrade.
-    let mut embedder = session(embedding_model, GraphOptimizationLevel::Disable)?;
+    let mut embedder = embedding_session(embedding_model)?;
     let mut embeddings: Vec<Option<Vec<f32>>> = Vec::with_capacity(regions.len());
     for &(start, end) in &regions {
         let e = if end - start >= MIN_EMBED_S {
@@ -70,6 +67,14 @@ pub fn separate(samples: &[i16], segmentation_model: &Path, embedding_model: &Pa
     let durations: Vec<f64> = regions.iter().map(|&(start, end)| end - start).collect();
     let labels = cluster(&embeddings, &durations, opts);
     Ok(regions.iter().zip(labels).map(|(&(start, end), speaker)| Turn { start, end, speaker }).collect())
+}
+
+/// The WeSpeaker CAM++ session, with graph optimization OFF (spec 022): the ONNX Runtime bundled
+/// with ort 2.0.0-rc.10 corrupts this model at any level ≥ Level1 (norm ~150 vectors, cosine ≈ 0
+/// to the right embedding). Re-run the golden-embedding test before re-enabling it after an `ort`
+/// upgrade.
+fn embedding_session(path: &Path) -> Result<Session> {
+    session(path, GraphOptimizationLevel::Disable)
 }
 
 fn session(path: &Path, optimization: GraphOptimizationLevel) -> Result<Session> {
@@ -335,6 +340,41 @@ mod tests {
         assert_eq!(cluster(&[a.clone(), b.clone(), None, b2.clone(), a2.clone()], &[5.0, 5.0, 0.5, 5.0, 5.0], &opts), vec![1, 2, 2, 2, 1]);
         // nothing embedded: everyone is speaker 1
         assert_eq!(cluster(&[None, None], &[0.5, 0.5], &opts), vec![1, 1]);
+    }
+
+    /// The fixed 3 s input of the golden test. Must match `test_input()` in
+    /// `scripts/diarize_reference.py`.
+    fn golden_input() -> Vec<i16> {
+        let mut s: u64 = 22;
+        (0..SAMPLE_RATE as usize * 3)
+            .map(|n| {
+                let t = n as f64 / SAMPLE_RATE as f64;
+                s = (s * 1103515245 + 12345) % (1 << 31);
+                let u = s as f64 / (1u64 << 31) as f64;
+                let tau = 2.0 * std::f64::consts::PI;
+                let v = 3000.0 * (tau * 220.0 * t).sin() + 2000.0 * (tau * 440.0 * t + 0.5).sin() + 1000.0 * (tau * 1234.0 * t).sin() + 2000.0 * (u - 0.5);
+                (v + 0.5).floor().clamp(-32768.0, 32767.0) as i16
+            })
+            .collect()
+    }
+
+    /// Guards against a broken embedding passing silently (spec 022: ort's optimizer corrupted
+    /// CAM++, cosine ≈ 0). Needs the local model:
+    /// `cargo test -p fofoca-core -- --ignored embedding_matches`. Regenerate the reference with
+    /// `scripts/diarize_reference.py`.
+    #[test]
+    #[ignore]
+    fn embedding_matches_the_python_reference() {
+        let model = crate::config::DiarizationConfig::default().embedding_model;
+        let reference: serde_json::Value = serde_json::from_str(include_str!("../tests/data/campp_reference.json")).unwrap();
+        let expected: Vec<f32> = reference["embedding"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect();
+        let mut sess = embedding_session(&model).unwrap();
+        let got = embed(&mut sess, &golden_input()).unwrap();
+        assert_eq!(got.len(), expected.len());
+        let cos = sim(&normalize(&got), &normalize(&expected));
+        let norm = got.iter().map(|x| x * x).sum::<f32>().sqrt();
+        eprintln!("cosine {cos:.6}, norm {norm:.4} (reference {})", reference["norm"]);
+        assert!(cos >= 0.999, "embedding drifted from the onnxruntime reference: cosine {cos}");
     }
 
     fn speakers(labels: &[u32]) -> usize {
