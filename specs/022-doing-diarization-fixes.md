@@ -1,3 +1,6 @@
+Status: doing
+Branch: moacyrricardo/spec-022-diarization-fixes-build
+
 # 022 — Diarization fixes: embeddings, timing, cluster cleanup
 
 ## Context
