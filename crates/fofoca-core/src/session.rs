@@ -279,6 +279,7 @@ impl Worker {
             Ok(Outcome::Discarded) => true,
             Ok(Outcome::Finished) => false,
             Err(e) => {
+                self.post_ok = false;
                 self.error(format!("{e:#}"));
                 false
             }
@@ -305,6 +306,10 @@ impl Worker {
             }
         }
         // Spec 011: with "delete after processing", the audio goes now.
+        if !processed {
+            (self.emit)(SessionEvent::Finished { meeting: self.meeting.clone() });
+            return;
+        }
         match crate::retention::apply(&self.store, &self.cfg.audio, chrono::Local::now().fixed_offset(), Some(&self.meeting.id), false) {
             Ok(freed) if !freed.is_empty() => {
                 self.notice("Audio deleted after processing, as set in Settings — the transcript and notes are kept.");
@@ -421,8 +426,21 @@ impl Worker {
 
         mic_wav.finish()?;
         sys_wav.finish()?;
-        if !live {
-            self.transcribe_recording(chunk)?;
+        if !live || self.cfg.workflow.transcript_after {
+            (self.emit)(SessionEvent::Step { step: pipeline::STEP_TRACKS.into() });
+            let client = self.asr.as_ref().map(|(_, client)| client);
+            let hooks = pipeline::Hooks { progress: &|_, _| {}, yield_gpu: &|| false };
+            match pipeline::transcribe_tracks(&self.store, &self.cfg, &self.meeting.id, client, &hooks) {
+                Ok(pipeline::TrackResult::Done(_)) => self.segments = self.store.load(&self.meeting.id)?.segments,
+                Ok(pipeline::TrackResult::Skipped(reason)) => {
+                    self.post_ok = false;
+                    self.notice(&reason);
+                }
+                Err(e) => {
+                    self.post_ok = false;
+                    self.error(format!("Per-track transcription failed — the live transcript is kept: {e:#}"));
+                }
+            }
         }
         // Whisper isn't needed any more; free the GPU before the CPU and summary steps.
         self.asr = None;
@@ -459,25 +477,6 @@ impl Worker {
         }
         (self.emit)(SessionEvent::Step { step: "saving".into() });
         Ok(Outcome::Finished)
-    }
-
-    /// Record-only mode (spec 015): transcribe the saved tracks after the call, in the same
-    /// quiet-point chunks a live session uses, so You/Call attribution works the same way.
-    fn transcribe_recording(&mut self, chunk: usize) -> Result<()> {
-        let mic = audio::read_wav(&self.dir.join("mic.wav"))?;
-        let sys = audio::read_wav(&self.dir.join("system.wav"))?;
-        let total = mic.len().max(sys.len());
-        self.offset_s = 0.0;
-        let mut pos = 0;
-        while pos < total {
-            let (m, s) = (&mic[pos.min(mic.len())..], &sys[pos.min(sys.len())..]);
-            let (m, s) = (&m[..m.len().min(chunk + 1)], &s[..s.len().min(chunk + 1)]);
-            let n = audio::quiet_cut(m, s, chunk, 3 * SAMPLE_RATE as usize).max(1).min(total - pos);
-            self.transcribe_chunk(&m[..n.min(m.len())], &s[..n.min(s.len())]);
-            pos += n;
-        }
-        self.offset_s = total as f64 / SAMPLE_RATE as f64;
-        Ok(())
     }
 
     fn transcribe_chunk(&mut self, mic: &[i16], sys: &[i16]) {
@@ -599,7 +598,7 @@ impl Worker {
                 Ok(()) => {
                     let _ = pipeline::mark_done(&self.store, &self.meeting.id, pipeline::STEP_NOTES);
                 }
-                Err(e) => self.error(format!("saving notes: {e:#}")),
+                Err(e) => { self.post_ok = false; self.error(format!("saving notes: {e:#}")); }
             }
         }
         if kind == SummaryKind::Final && (fallback.is_some() || result.is_err()) {
@@ -618,6 +617,7 @@ impl Worker {
                     gen_tokens_per_s: c.gen_tokens_per_s,
                 };
                 if let Err(e) = self.store.add_summary(&self.meeting.id, &summary) {
+                    self.post_ok = false;
                     self.error(format!("saving summary: {e:#}"));
                 }
                 (self.emit)(SessionEvent::Summary { summary });
@@ -659,7 +659,7 @@ impl Worker {
     }
 }
 
-fn tail_chars(s: &str, n: usize) -> String {
+pub(crate) fn tail_chars(s: &str, n: usize) -> String {
     let count = s.chars().count();
     s.chars().skip(count.saturating_sub(n)).collect()
 }

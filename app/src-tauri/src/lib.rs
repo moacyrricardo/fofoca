@@ -248,8 +248,24 @@ fn import_recording(state: State<AppState>, path: String, title: Option<String>,
             ..Default::default()
         })
         .map_err(err)?;
-    state.jobs.import(meta.id.clone(), src);
+    state.jobs.import(meta.id.clone(), src).map_err(err)?;
     Ok(meta)
+}
+
+fn check_retranscribe(store: &Store, id: &str, recording_id: Option<&str>) -> CmdResult<()> {
+    if recording_id == Some(id) { return Err("This meeting is still recording".into()); }
+    let tracks = store.audio_tracks(id).map_err(err)?;
+    if store.load(id).map_err(err)?.meta.audio_deleted_at.is_some() || (tracks.mic.is_none() && tracks.call.is_none()) {
+        return Err("The audio was deleted".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn retranscribe(state: State<AppState>, id: String) -> CmdResult<()> {
+    let session = state.session.lock().unwrap();
+    check_retranscribe(&state.store, &id, session.as_ref().map(|s| s.meeting.id.as_str()))?;
+    state.jobs.retranscribe(id).map_err(err)
 }
 
 #[tauri::command]
@@ -525,6 +541,7 @@ pub fn run() {
             set_audio_policy,
             pick_recording,
             import_recording,
+            retranscribe,
             active_session,
             start_session,
             summarize_now,
@@ -543,4 +560,23 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running fo-foca");
+}
+
+#[cfg(test)]
+mod retranscribe_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_recording_deleted_or_absent_audio() {
+        let root = std::env::temp_dir().join(format!("fofoca-rerun-{}", std::process::id()));
+        let store = Store::new(&root).unwrap();
+        let id = store.create(&StartInfo::default()).unwrap().id;
+        assert!(check_retranscribe(&store, &id, None).is_err());
+        std::fs::write(store.dir(&id).join("mic.wav"), []).unwrap();
+        assert!(check_retranscribe(&store, &id, Some(&id)).is_err());
+        assert!(check_retranscribe(&store, &id, Some("another")).is_ok());
+        store.update_meta(&id, |m| m.audio_deleted_at = Some("deleted".into())).unwrap();
+        assert_eq!(check_retranscribe(&store, &id, None).unwrap_err(), "The audio was deleted");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

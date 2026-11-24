@@ -70,6 +70,7 @@ mod tests {
             id: "m".into(),
             title: "t".into(),
             started_at: started.into(),
+            transcript_source: None,
             duration_s: 60.0,
             finished,
             attendees: vec![],

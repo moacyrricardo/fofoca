@@ -27,7 +27,7 @@ export type SessionEvent =
   | { type: "paused"; at_s: number }
   | { type: "resumed"; at_s: number }
   | { type: "stopping" }
-  | { type: "step"; step: "transcribing" | "summarizing" | "saving" }
+  | { type: "step"; step: "transcribing" | "tracks" | "speakers" | "summarizing" | "saving" }
   | { type: "summary"; summary: Summary }
   | { type: "finished"; meeting: MeetingMeta }
   | { type: "discarded"; meeting_id: string }
@@ -44,7 +44,7 @@ export interface CalendarSettings { sources: CalendarSource[]; only_with_call_li
 export interface Upcoming { events: CalendarEvent[]; errors: string[] }
 
 /** Background job progress (spec 012). */
-export interface JobEvent { meeting_id: string; step: "queued" | "converting" | "transcribing" | "speakers" | "notes" | "done" | "failed"; progress: number; error?: string }
+export interface JobEvent { meeting_id: string; step: "queued" | "converting" | "tracks" | "transcribing" | "speakers" | "notes" | "done" | "failed"; progress: number; error?: string }
 export interface AudioConfig { keep: "always" | "after_processing" | "days"; keep_days: number }
 export interface StorageView { audio: AudioConfig; audio_bytes: number; meetings_with_audio: number }
 
@@ -57,7 +57,7 @@ export type Layout = "swap" | "gpu_transcript" | "gpu_summary" | "cpu" | "gpu_bo
 export type Updates = "fast" | "balanced" | "light" | "custom";
 export interface Workflow {
   live_transcript: boolean; live_summary: boolean; layout: Layout; live_device: Device; updates: Updates;
-  summary_every_s: number; speakers_after: boolean; notes_after: boolean; notes_device: Device;
+  summary_every_s: number; transcript_after: boolean; speakers_after: boolean; notes_after: boolean; notes_device: Device;
 }
 export interface Gpu { device: string; name: string; total_mib: number; free_mib: number }
 export interface Footprint { mib: number; measured: boolean }

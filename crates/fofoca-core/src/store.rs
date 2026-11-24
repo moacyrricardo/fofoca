@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::labels;
-use crate::model::{Meeting, MeetingMeta, Segment, SpeakerInfo, StartInfo, Summary};
+use crate::model::{Meeting, MeetingMeta, Segment, SpeakerInfo, StartInfo, Summary, TranscriptSource};
 use std::collections::BTreeMap;
 
 /// A meeting's audio files on disk (spec 014); `None` when that track doesn't exist (imports have
@@ -82,6 +82,7 @@ impl Store {
             id,
             title: if title.trim().is_empty() { format!("Meeting {}", now.format("%d/%m %H:%M")) } else { title.trim().to_string() },
             started_at: info.started_at.clone().unwrap_or_else(|| now.to_rfc3339()),
+            transcript_source: None,
             duration_s: 0.0,
             finished: false,
             attendees: info.attendees.clone(),
@@ -143,22 +144,54 @@ impl Store {
         Ok(())
     }
 
-    /// Replace the whole transcript (atomically). The first time, the live transcript is kept as
-    /// `transcript.live.jsonl` so speaker assignment can be redone from it.
-    pub fn replace_transcript(&self, id: &str, segments: &[Segment]) -> Result<()> {
+    /// Publish a complete, independent snapshot once, including on concurrent retries.
+    pub fn keep_live(&self, id: &str) -> Result<()> {
         let dir = self.dir(id);
-        let (path, live) = (dir.join("transcript.jsonl"), dir.join("transcript.live.jsonl"));
-        if path.exists() && !live.exists() {
-            std::fs::copy(&path, &live)?;
+        let saved = dir.join("transcript.jsonl");
+        let live = dir.join("transcript.live.jsonl");
+        if !saved.exists() || live.exists() || dir.join("transcript.tracks.jsonl").exists() {
+            return Ok(());
         }
-        let tmp = dir.join("transcript.jsonl.tmp");
-        let mut body = String::new();
-        for s in segments {
-            body.push_str(&serde_json::to_string(s)?);
-            body.push('\n');
+        let mut snapshot = tempfile::NamedTempFile::new_in(dir)?;
+        std::io::copy(&mut std::fs::File::open(saved)?, &mut snapshot)?;
+        match snapshot.persist_noclobber(live) {
+            Ok(_) => Ok(()),
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e.error.into()),
         }
-        std::fs::write(&tmp, body)?;
-        std::fs::rename(&tmp, &path)?;
+    }
+
+    pub fn replace_transcript(&self, id: &str, segments: &[Segment]) -> Result<()> {
+        self.keep_live(id)?;
+        write_segments(&self.dir(id).join("transcript.jsonl"), segments)
+    }
+
+    pub fn save_tracks(&self, id: &str, segments: &[Segment]) -> Result<()> {
+        write_segments(&self.dir(id).join("transcript.tracks.jsonl"), segments)
+    }
+
+    pub fn source_transcript(&self, id: &str, source: TranscriptSource) -> Result<Vec<Segment>> {
+        let name = match source {
+            TranscriptSource::Live => "transcript.live.jsonl",
+            TranscriptSource::Tracks => "transcript.tracks.jsonl",
+        };
+        read_jsonl(&self.dir(id).join(name)).with_context(|| format!("{name} is unavailable"))
+    }
+
+    pub fn base_transcript(&self, id: &str) -> Result<Vec<Segment>> {
+        if self.load(id)?.meta.transcript_source == Some(TranscriptSource::Live) {
+            self.source_transcript(id, TranscriptSource::Live)
+        } else if self.dir(id).join("transcript.tracks.jsonl").exists() {
+            self.source_transcript(id, TranscriptSource::Tracks)
+        } else {
+            self.live_transcript(id)
+        }
+    }
+
+    pub fn select_transcript(&self, id: &str, source: TranscriptSource) -> Result<()> {
+        let segments = self.source_transcript(id, source)?;
+        self.replace_transcript(id, &segments)?;
+        self.update_meta(id, |m| m.transcript_source = Some(source))?;
         Ok(())
     }
 
@@ -170,6 +203,23 @@ impl Store {
         } else {
             read_jsonl(&self.dir(id).join("transcript.jsonl"))
         }
+    }
+
+    pub fn clear_transcript_results(&self, id: &str) -> Result<()> {
+        let dir = self.dir(id);
+        let notes = dir.join("notes.json");
+        if notes.exists() { std::fs::remove_file(notes)?; }
+        let summaries = dir.join("summaries.json");
+        if summaries.exists() {
+            let mut all: Vec<Summary> = read_json(&summaries)?;
+            all.retain(|s| s.kind == crate::model::SummaryKind::Partial);
+            write_json(&summaries, &all)?;
+        }
+        self.update_meta(id, |m| {
+            m.processed = false;
+            m.steps_done.retain(|s| s != "speakers" && s != "notes");
+        })?;
+        Ok(())
     }
 
     pub fn save_notes(&self, id: &str, notes: &crate::grounding::Notes) -> Result<()> {
@@ -255,6 +305,19 @@ impl Store {
         out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         Ok(out)
     }
+}
+
+fn write_segments(path: &Path, segments: &[Segment]) -> Result<()> {
+    let tmp = tempfile::NamedTempFile::new_in(path.parent().context("missing transcript directory")?)?;
+    let mut file = std::io::BufWriter::new(tmp.as_file());
+    for segment in segments {
+        serde_json::to_writer(&mut file, segment)?;
+        writeln!(file)?;
+    }
+    file.flush()?;
+    drop(file);
+    tmp.persist(path)?;
+    Ok(())
 }
 
 fn write_json<T: serde::Serialize>(path: &Path, v: &T) -> Result<()> {

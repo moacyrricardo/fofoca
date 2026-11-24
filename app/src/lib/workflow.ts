@@ -77,10 +77,14 @@ export function setupTitle(w: Workflow): string {
   return `${short[w.layout]} · ${pace}`;
 }
 
+export function transcriptDevice(w: Workflow): Device {
+  return w.live_transcript && w.live_summary ? layoutInfo(w.layout).devices[0] : w.live_device;
+}
+
 /** The steps that run when a recording stops, in order. */
 export function afterSteps(w: Workflow): { name: string; device: Device | null }[] {
   const out: { name: string; device: Device | null }[] = [];
-  if (!w.live_transcript) out.push({ name: "Transcribe", device: w.live_device });
+  if (!w.live_transcript || w.transcript_after) out.push({ name: "Transcript per track", device: transcriptDevice(w) });
   if (w.speakers_after) out.push({ name: "Speakers", device: "cpu" });
   if (w.notes_after) out.push({ name: "Checked notes", device: w.notes_device });
   out.push({ name: "Storage", device: null });

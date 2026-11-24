@@ -65,6 +65,13 @@ pub struct Summary {
     pub gen_tokens_per_s: f64,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptSource {
+    Live,
+    Tracks,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MeetingMeta {
     pub id: String,
@@ -73,6 +80,8 @@ pub struct MeetingMeta {
     pub started_at: String,
     #[serde(default)]
     pub duration_s: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_source: Option<TranscriptSource>,
     #[serde(default)]
     pub finished: bool,
     /// Invitees from the calendar event the recording was started from (names for spec 003).

@@ -7,6 +7,8 @@
 //!                                           replay a WAV in simulated real time through the live
 //!                                           chunker; print per-line latency, backlog and WER
 //! fofoca-cli record --seconds N [--title T] [--label L]… [--summary-at S] [--no-summary | --discard]
+//! fofoca-cli transcript <id> show live|tracks|saved [--counts] | use live|tracks
+//! fofoca-cli retranscribe <id>             rebuild transcript and enabled downstream steps
 //! fofoca-cli summarize <meeting-id>         write a final summary for a stored meeting
 //! fofoca-cli diarize <meeting-id>           (re-)run speaker separation on the call track
 //! fofoca-cli notes <meeting-id>             (re-)write grounded notes for a stored meeting
@@ -30,6 +32,7 @@ use fofoca_core::audio::{self, SAMPLE_RATE};
 use fofoca_core::config::config_path;
 use fofoca_core::llm::LlmClient;
 use fofoca_core::model::{Summary, SummaryKind};
+use fofoca_core::pipeline;
 use fofoca_core::prompts::{self, mmss};
 use fofoca_core::servers::{Kind, ModelServer};
 use fofoca_core::whisper::WhisperClient;
@@ -49,6 +52,14 @@ fn run() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("config") => {
             println!("# {}\n{}", config_path().display(), toml_pretty(&cfg)?);
+            Ok(())
+        }
+        Some("transcript") => transcript(&cfg, &store, &args[1..]),
+        Some("retranscribe") => {
+            let id = args.get(1).context("usage: retranscribe <id>")?;
+            let report = pipeline::retranscribe(&store, &cfg, id, &offline_hooks())?;
+            println!("You {}, Call {}, tracks {:.1}s", report.tracks.you, report.tracks.call, report.tracks.took_s);
+            println!("Speakers {}, notes {}", report.speakers, report.notes);
             Ok(())
         }
         Some("transcribe") => transcribe(&cfg, args.get(1).context("usage: transcribe <file.wav>")?),
@@ -91,6 +102,50 @@ fn run() -> Result<()> {
         }
     }
 }
+
+fn transcript(cfg: &Config, store: &Store, args: &[String]) -> Result<()> {
+    use fofoca_core::model::{Track, TranscriptSource};
+    const USAGE: &str = "usage: transcript <id> show live|tracks|saved [--counts] or transcript <id> use live|tracks";
+    let id = args.first().context(USAGE)?;
+    let action = args.get(1).context(USAGE)?.as_str();
+    let source = match args.get(2).context(USAGE)?.as_str() {
+        "live" => Some(TranscriptSource::Live),
+        "tracks" => Some(TranscriptSource::Tracks),
+        "saved" if action == "show" => None,
+        _ => bail!(USAGE),
+    };
+    match action {
+        "show" if args.len() == 3 || (args.len() == 4 && args[3] == "--counts") => {
+            let meeting = store.load(id)?;
+            let lines = match source {
+                Some(TranscriptSource::Live) if !store.dir(id).join("transcript.tracks.jsonl").exists() => store.live_transcript(id)?,
+                Some(source) => store.source_transcript(id, source)?,
+                None => meeting.segments,
+            };
+            if args.len() == 4 {
+                let you = lines.iter().filter(|s| s.track == Track::You).count();
+                println!("You {you}, Call {}, duration {:.1}s", lines.len() - you, meeting.meta.duration_s);
+            } else {
+                for s in &lines {
+                    let name = fofoca_core::speakers::display_name(s, &meeting.speakers, "en");
+                    println!("[{}–{}] {name}: {}", mmss(s.start), mmss(s.end), s.text);
+                }
+            }
+        }
+        "use" if args.len() == 3 => {
+            store.select_transcript(id, source.context(USAGE)?)?;
+            let (speakers, notes) = pipeline::finish_transcript(store, cfg, id, &offline_hooks(), false)?;
+            println!("Speakers {speakers}, notes {notes}");
+        }
+        _ => bail!(USAGE),
+    }
+    Ok(())
+}
+
+fn offline_hooks() -> pipeline::Hooks<'static> {
+    pipeline::Hooks { progress: &|_, _| {}, yield_gpu: &|| false }
+}
+
 
 fn transcribe(cfg: &Config, path: &str) -> Result<()> {
     let samples = audio::read_wav(path.as_ref())?;
@@ -319,6 +374,7 @@ fn eval_notes(cfg: &Config, args: &[String]) -> Result<()> {
         id: "eval".into(),
         title: "eval".into(),
         started_at: chrono::Local::now().to_rfc3339(),
+        transcript_source: None,
         duration_s: 0.0,
         finished: true,
         attendees: vec!["Rodrigo".into(), "Fernanda".into()],
@@ -377,10 +433,10 @@ fn eval_notes(cfg: &Config, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Transcribe a whole 16 kHz mono WAV like a live session would (quiet-point chunks, VAD).
+/// Offline evaluation uses the same packed Call track as an import.
 fn transcribe_segments(cfg: &Config, samples: &[i16]) -> Result<Vec<fofoca_core::Segment>> {
     let hooks = fofoca_core::pipeline::Hooks { progress: &|_, _| {}, yield_gpu: &|| false };
-    fofoca_core::pipeline::transcribe_samples(cfg, samples, &hooks)
+    pipeline::transcribe_track(&mut pipeline::TrackAsr::new(None), fofoca_core::model::Track::Call, samples, cfg, &hooks)
 }
 
 /// Import a recording made elsewhere as a meeting (spec 012) and print its notes.

@@ -88,7 +88,7 @@
           <div class="tail">
             {#if jobs[m.id] && !["done", "failed"].includes(jobs[m.id].step)}
               {@const j = jobs[m.id]}
-              <span class="chip gpu"><span class="spin sm"></span>{JOB_STEPS[j.step] ?? j.step}{j.step === "transcribing" ? ` ${Math.round(j.progress * 100)}%` : ""}</span>
+              <span class="chip gpu"><span class="spin sm"></span>{JOB_STEPS[j.step] ?? j.step}{["tracks", "transcribing"].includes(j.step) ? ` ${Math.round(j.progress * 100)}%` : ""}</span>
             {:else}
               {#if m.imported_from}<span class="chip" title={m.imported_from}>⤓ Imported</span>{/if}
               {#if m.finished}<span class="chip ok">✓ Saved</span>{:else}<span class="chip">Unfinished</span>{/if}

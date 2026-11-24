@@ -12,13 +12,22 @@
   import { load as loadAudio, play, player, seek, skip, toggle, unload as unloadAudio } from "../lib/player.svelte";
   import { lineAt, wordAt, wordTimes } from "../lib/replay";
 
-  let { id, job, onback, notify, initialTab, backLabel = "Meetings" }: {
-    id: string; job?: JobEvent; onback: () => void; notify: (t: string, e?: boolean) => void;
+  let { id, job, recording, onback, notify, initialTab, backLabel = "Meetings" }: {
+    id: string; recording: boolean; job?: JobEvent; onback: () => void; notify: (t: string, e?: boolean) => void;
     /** Open on this tab (spec 016: a task opens its meeting on Tasks). */
     initialTab?: "tasks"; backLabel?: string;
   } = $props();
-  const importing = $derived(!!job && !["done", "failed"].includes(job.step));
+  const processing = $derived(!!job && !["done", "failed"].includes(job.step));
 
+  const jobFinished = $derived(job?.step === "done" || job?.step === "failed");
+  let requesting = $state(false);
+  async function retranscribe() {
+    requesting = true;
+    try { await api.retranscribe(id); }
+    catch (e) { notify(String(e), true); }
+    finally { requesting = false; }
+  }
+  let loadedId: string | undefined;
   let meeting = $state<Meeting | null>(null);
   let tab = $state<"summary" | "tasks" | "transcript" | "speakers">("summary");
   let separating = $state(false);
@@ -119,25 +128,29 @@
 
   $effect(() => {
     const want = id;
-    void (job?.step === "done"); // reload when an import of this meeting finishes
-    meeting = null;
+    void jobFinished;
+    const firstLoad = loadedId !== want;
+    if (firstLoad) meeting = null;
+    let current = true;
     if (player.meetingId !== want) {
       unloadAudio();
       audio = "loading";
     }
     api.meeting(want).then((m) => {
-      if (want === id) {
+      if (current && want === id) {
+        loadedId = want;
         meeting = m;
-        if (!m.meta.finished || m.meta.audio_deleted_at) audio = "none";
+        if (recording || m.meta.audio_deleted_at) audio = "none";
         else api.audioTracks(want).then((urls) => {
-          if (want !== id) return;
+          if (!current || want !== id) return;
           loadAudio(want, urls, Math.max(m.meta.duration_s, m.segments.at(-1)?.end ?? 0));
           audio = urls.mic || urls.call ? "ok" : "none";
         }).catch((e) => { audio = "none"; notify(String(e), true); });
-        tab = initialTab ?? (m.notes || m.summaries.some((s) => s.kind === "final") ? "summary" : "transcript");
-        if (preview && ["#speakers", "#transcript", "#tasks"].includes(location.hash)) tab = location.hash.slice(1) as typeof tab; // browser preview only
+        if (firstLoad) tab = initialTab ?? (m.notes || m.summaries.some((s) => s.kind === "final") ? "summary" : "transcript");
+        if (firstLoad && preview && ["#speakers", "#transcript", "#tasks"].includes(location.hash)) tab = location.hash.slice(1) as typeof tab; // browser preview only
       }
     }).catch((e) => notify(String(e), true));
+    return () => { current = false; };
   });
 
   async function saveLabels(labels: string[]) {
@@ -208,9 +221,9 @@
     {#if meeting.meta.attendees?.length}
       <div class="faint small">Invited: {meeting.meta.attendees.join(", ")}</div>
     {/if}
-    {#if importing && job}
-      <div class="card importing"><span class="spin"></span><div><b>Importing{meeting.meta.imported_from ? ` ${meeting.meta.imported_from}` : ""}</b>
-        <div class="faint small">{JOB_STEPS[job.step] ?? job.step}{job.step === "transcribing" ? ` · ${Math.round(job.progress * 100)}%` : ""} — the notes appear here when it's done. Recording a meeting pauses the import.</div></div></div>
+    {#if processing && job}
+      <div class="card importing"><span class="spin"></span><div><b>Processing recording</b>
+        <div class="faint small">{JOB_STEPS[job.step] ?? job.step}{["tracks", "transcribing"].includes(job.step) ? ` · ${Math.round(job.progress * 100)}%` : ""}. Recording a meeting pauses this job.</div></div></div>
     {:else if meeting.meta.imported_from}
       <div class="faint small">⤓ Imported from {meeting.meta.imported_from}</div>
     {/if}
@@ -225,7 +238,7 @@
           {#if confirmDelete}
             <span class="sure">Delete the recording? <button class="link danger" onclick={deleteAudio}>Delete</button> · <button class="link" onclick={() => (confirmDelete = false)}>Cancel</button></span>
           {:else}
-            <button class="link" onclick={() => (confirmDelete = true)}>Delete audio now</button>
+            <button class="link" disabled={processing} onclick={() => (confirmDelete = true)}>Delete audio now</button>
           {/if}
         {/if}
       </div>
@@ -267,7 +280,7 @@
         <p class="faint">No final summary for this meeting{meeting.segments.length ? "" : " — nothing was transcribed"}.</p>
       {/if}
       {#if meeting.segments.length && meeting.meta.finished}
-        <button class="btn ghost sm" onclick={writeNotes} disabled={writing}>{writing ? "Writing checked notes… (loads the summary model)" : "Write checked notes"}</button>
+        <button class="btn ghost sm" onclick={writeNotes} disabled={writing || processing}>{writing ? "Writing checked notes… (loads the summary model)" : "Write checked notes"}</button>
       {/if}
       {#if partials.length}
         <details>
@@ -313,11 +326,14 @@
           <datalist id={attendeeList}>{#each meeting.meta.attendees ?? [] as a}<option value={a}></option>{/each}</datalist>
         {/if}
         <div class="again">
-          <button class="btn ghost sm" onclick={separate} disabled={separating || !!meeting.meta.audio_deleted_at} title={meeting.meta.audio_deleted_at ? "The audio was deleted" : ""}>{separating ? "Separating voices…" : voices.length ? "↻ Separate again" : "Separate speakers"}</button>
+          <button class="btn ghost sm" onclick={separate} disabled={separating || processing || !!meeting.meta.audio_deleted_at} title={meeting.meta.audio_deleted_at ? "The audio was deleted" : ""}>{separating ? "Separating voices…" : voices.length ? "↻ Separate again" : "Separate speakers"}</button>
           {#if voices.length}<span class="faint small">keeps the names given above</span>{/if}
         </div>
       </div>
     {:else}
+      <button class="btn ghost sm" onclick={retranscribe}
+        disabled={audio !== "ok" || recording || processing || requesting || separating || writing}
+        title={meeting.meta.audio_deleted_at || (!recording && audio === "none") ? "The audio was deleted" : undefined}>Transcribe again from the audio</button>
       <div class="card tx">
         {#if replay}
           <Player segments={meeting.segments} speakers={meeting.speakers} pauses={pauseAts} onseek={() => (away = false)} />

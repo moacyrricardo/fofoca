@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { afterSteps, peakMib, setupTitle, unavailable } from "./workflow";
 import type { Workflow } from "./types";
 
-const base: Workflow = { live_transcript: true, live_summary: true, layout: "swap", live_device: "gpu", updates: "balanced", summary_every_s: 300, speakers_after: true, notes_after: true, notes_device: "gpu" };
+const base: Workflow = { live_transcript: true, live_summary: true, layout: "swap", live_device: "gpu", updates: "balanced", summary_every_s: 300, transcript_after: true, speakers_after: true, notes_after: true, notes_device: "gpu" };
 
 test("GPU memory at peak per layout", () => {
   assert.deepEqual(peakMib(base, 824, 1414), { mib: 1414, whisper: 0, llm: 1414 }); // one at a time
@@ -32,6 +32,13 @@ test("banner titles and after-call steps", () => {
   assert.equal(setupTitle({ ...base, live_summary: false, updates: "fast" }), "Live transcript on the GPU · Fast updates");
   assert.equal(setupTitle({ ...base, live_transcript: false }), "Record only");
   assert.equal(setupTitle({ ...base, updates: "custom", layout: "cpu" }), "Everything on the CPU · Custom updates");
-  assert.deepEqual(afterSteps(base).map((s) => s.name), ["Speakers", "Checked notes", "Storage"]);
-  assert.deepEqual(afterSteps({ ...base, live_transcript: false, speakers_after: false }).map((s) => s.name), ["Transcribe", "Checked notes", "Storage"]);
+  assert.deepEqual(afterSteps(base).map((s) => s.name), ["Transcript per track", "Speakers", "Checked notes", "Storage"]);
+  assert.deepEqual(afterSteps({ ...base, live_transcript: false, speakers_after: false }).map((s) => s.name), ["Transcript per track", "Checked notes", "Storage"]);
+});
+
+test("per-track transcription follows the toggle, record-only mode and Whisper device", () => {
+  assert.equal(afterSteps({ ...base, transcript_after: false })[0].name, "Speakers");
+  assert.deepEqual(afterSteps({ ...base, layout: "gpu_summary" })[0], { name: "Transcript per track", device: "cpu" });
+  assert.deepEqual(afterSteps({ ...base, live_transcript: false, transcript_after: false, live_device: "cpu" })[0],
+    { name: "Transcript per track", device: "cpu" });
 });

@@ -55,7 +55,7 @@
     if (e.step === "done" || e.step === "failed") {
       const title = meetings.find((m) => m.id === e.meeting_id)?.title ?? "recording";
       if (e.step === "done") notify(`“${title}” is ready.`);
-      else notify(`Importing “${title}” failed: ${e.error ?? "unknown error"}`, true);
+      else notify(`Processing “${title}” failed: ${e.error ?? "unknown error"}`, true);
       refresh();
     }
   }
@@ -65,7 +65,6 @@
       const path = await api.pickRecording();
       if (!path) return;
       const m = await api.importRecording(path);
-      jobs[m.id] = { meeting_id: m.id, step: "queued", progress: 0 };
       await refresh();
       notify(`Importing “${m.title}” — it'll be ready in a few minutes.`);
     } catch (e) {
@@ -280,9 +279,9 @@
     {:else if screen === "live"}
       <Live {config} onstart={start} onstop={() => (screen = "processing")} {notify} />
     {:else if screen === "processing"}
-      <Processing onopen={(id) => open(id)} />
+      <Processing workflow={config?.config.workflow} onopen={(id) => open(id)} />
     {:else if screen === "meeting" && openId}
-      <MeetingView id={openId} job={jobs[openId]} initialTab={openTab} backLabel={backTo === "tasks" ? "Tasks" : "Meetings"} onback={() => go(backTo)} {notify} />
+      <MeetingView id={openId} recording={live.meeting?.id === openId} job={jobs[openId]} initialTab={openTab} backLabel={backTo === "tasks" ? "Tasks" : "Meetings"} onback={() => go(backTo)} {notify} />
     {:else if screen === "tasks"}
       <Tasks onopen={(id) => open(id, "tasks")} {notify} />
     {:else if screen === "settings"}
