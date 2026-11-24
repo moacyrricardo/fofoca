@@ -45,7 +45,10 @@ pub fn separate(samples: &[i16], segmentation_model: &Path, embedding_model: &Pa
     if regions.is_empty() {
         return Ok(Vec::new());
     }
-    let mut embedder = session(embedding_model)?;
+    // Graph optimization OFF for CAM++ (spec 022): the ONNX Runtime bundled with ort 2.0.0-rc.10
+    // corrupts this model at any level ≥ Level1 (norm ~150 vectors, cosine ≈ 0 to the right
+    // embedding). Re-run the golden-embedding test before re-enabling it after an `ort` upgrade.
+    let mut embedder = session(embedding_model, GraphOptimizationLevel::Disable)?;
     let mut embeddings: Vec<Option<Vec<f32>>> = Vec::with_capacity(regions.len());
     for &(start, end) in &regions {
         let e = if end - start >= MIN_EMBED_S {
@@ -61,12 +64,12 @@ pub fn separate(samples: &[i16], segmentation_model: &Path, embedding_model: &Pa
     Ok(regions.iter().zip(labels).map(|(&(start, end), speaker)| Turn { start, end, speaker }).collect())
 }
 
-fn session(path: &Path) -> Result<Session> {
+fn session(path: &Path, optimization: GraphOptimizationLevel) -> Result<Session> {
     if !path.exists() {
         bail!("model not found: {}", path.display());
     }
     Session::builder()?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_optimization_level(optimization)?
         .with_intra_threads(4)?
         .commit_from_file(path)
         .with_context(|| format!("loading {}", path.display()))
@@ -79,7 +82,8 @@ fn speech_regions(samples: &[i16], model: &Path) -> Result<Vec<(f64, f64)>> {
     const FRAME: usize = 270;
     const FIRST: usize = 721;
     let window = SAMPLE_RATE as usize * 10;
-    let mut sess = session(model)?;
+    // segmentation-3.0 is unaffected by the optimizer (identical regions either way).
+    let mut sess = session(model, GraphOptimizationLevel::Level3)?;
     let mut padded = samples.to_vec();
     padded.resize(samples.len().div_ceil(window).max(1) * window, 0);
 
