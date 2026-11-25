@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
+use chrono::{Datelike, Timelike};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{collapse_home, Config};
@@ -153,10 +154,13 @@ fn words_text(words: &[&Word]) -> String {
 }
 
 /// A segment as one or more `(start, end, text)` cues, split at its word timings when it is longer
-/// than two subtitle lines or `CUE_SECONDS`.
+/// than two subtitle lines or `CUE_SECONDS`. A segment without word timings is only split by
+/// length (its words get times spread by character count): splitting it by duration would put
+/// words at made-up times.
 fn cues(seg: &Segment) -> Vec<(f64, f64, String)> {
     let text = seg.text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.chars().count() <= CUE_CHARS && seg.end - seg.start <= CUE_SECONDS {
+    let timed = !seg.words.is_empty();
+    if text.chars().count() <= CUE_CHARS && (!timed || seg.end - seg.start <= CUE_SECONDS) {
         return vec![(seg.start, seg.end, text)];
     }
     let words = if seg.words.is_empty() { approx_words(seg.start, seg.end, &text) } else { seg.words.clone() };
@@ -166,7 +170,7 @@ fn cues(seg: &Segment) -> Vec<(f64, f64, String)> {
         if let Some(first) = cur.first() {
             let mut next = cur.clone();
             next.push(w);
-            if words_text(&next).chars().count() > CUE_CHARS || w.end - first.start > CUE_SECONDS {
+            if words_text(&next).chars().count() > CUE_CHARS || (timed && w.end - first.start > CUE_SECONDS) {
                 out.push((first.start, cur[cur.len() - 1].end, words_text(&cur)));
                 cur.clear();
             }
@@ -575,10 +579,12 @@ pub fn run(store: &Store, cfg: &Config, id: &str, opts: &ExportOptions, progress
         let zip_name = format!("{name}.zip");
         report(ExportStep::Zipping, &zip_name);
         let mut zip = zip::ZipWriter::new(BufWriter::new(File::create(&part)?));
+        let now = chrono::Local::now().naive_local();
+        let stamp = zip::DateTime::from_date_and_time(now.year() as u16, now.month() as u8, now.day() as u8, now.hour() as u8, now.minute() as u8, now.second() as u8).unwrap_or_default();
         let mut since = 0;
         for e in &entries {
             let method = if e.file.path.ends_with(".wav") { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
-            let options = zip::write::SimpleFileOptions::default().compression_method(method).large_file(e.file.bytes >= u32::MAX as u64);
+            let options = zip::write::SimpleFileOptions::default().compression_method(method).last_modified_time(stamp).large_file(e.file.bytes >= u32::MAX as u64);
             zip.start_file(format!("{name}/{}", e.file.path), options)?;
             copy(&mut File::open(tmp.join(&e.file.path))?, &mut zip, cancel, |n| {
                 done.set(done.get() + n);
@@ -747,6 +753,9 @@ mod tests {
         assert!(srt.contains("\n2\n"), "over 84 characters: two cues\n{srt}");
         let rejoined: String = srt.lines().filter(|l| l.starts_with("Você: ") || (!l.contains("-->") && !l.is_empty() && l.parse::<u32>().is_err())).collect::<Vec<_>>().join(" ").replace("Você: ", "");
         assert_eq!(rejoined, text, "no word lost");
+        // short but long-lasting, without word timings: one cue, no invented split
+        let m = meeting(vec![seg(3700.0, 3710.0, "Fechado então.", Track::Call, None)]);
+        assert_eq!(transcript_srt(&m, "pt"), "1\n01:01:40,000 --> 01:01:50,000\nChamada: Fechado então.\n\n");
     }
 
     #[test]
@@ -896,6 +905,8 @@ mod tests {
         names.sort_by(|a, b| a.0.cmp(&b.0));
         let (s, d) = (zip::CompressionMethod::Stored, zip::CompressionMethod::Deflated);
         let n = |p: &str| format!("2026-11-20 Sync 20-11/{p}");
+        let year = z.by_index(0).unwrap().last_modified().map(|t| t.year());
+        assert_eq!(year, Some(chrono::Local::now().year() as u16), "entries carry the export time, not 1980");
         assert_eq!(names, [(n("audio/call.wav"), s), (n("audio/mic.wav"), s), (n("notes.md"), d), (n("tasks.md"), d), (n("transcript.md"), d), (n("transcript.srt"), d)]);
         let mut notes = String::new();
         z.by_name(&n("notes.md")).unwrap().read_to_string(&mut notes).unwrap();
