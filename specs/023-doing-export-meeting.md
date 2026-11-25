@@ -1,3 +1,6 @@
+Status: doing
+Branch: moacyrricardo/spec-023-export-meeting-build
+
 # 023 — Export a meeting to a folder
 
 > **Design reference (source of truth for the UI):** [`023-assets/export-mock.html`](023-assets/export-mock.html).
