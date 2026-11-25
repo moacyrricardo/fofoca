@@ -1,4 +1,4 @@
-Status: doing
+Status: done
 Branch: moacyrricardo/spec-023-export-meeting-build
 
 # 023 — Export a meeting to a folder
@@ -208,3 +208,98 @@ pub fn run(store: &Store, cfg: &Config, id: &str, opts: &ExportOptions,
 - The language follows the transcription, not the UI (D1). It's revisited if the UI gets
   translated.
 - **Not verified:** `tauri-plugin-opener` inside the AppImage; that's a hand test.
+
+## Implementation Notes
+
+Built on `moacyrricardo/spec-023-export-meeting-build`, stacked on the spec-only PR #37.
+
+### How the build differs from the spec
+- **SRT splitting (D7):** a segment **without word timings** is split by length (84 characters) only,
+  not by the 7 s rule. Its word times would be spread by character count, so a duration split would
+  put words at invented times. Exporting an invented meeting with the CLI showed a 10 s two-word line
+  turning into two cues. Segments with word timings follow D7 as written. Cues longer than one
+  subtitle line (42 characters) break at the space nearest the middle.
+- **Plan shape:** `ExportPlan.parts` is `Parts { transcript_lines, notes: Option<NotesSource>, tasks,
+  audio_tracks, audio_deleted_at, imported }`, facts rather than the spec's "enabled + reason". The
+  UI words the reasons ("No summary for this meeting", "No tasks for this meeting", "Deleted Nov 18",
+  "No audio was kept", "Nothing was transcribed"), so the core stays free of UI English (D1). The dialog
+  asks for the plan once on open and again after Choose…, with every part on. The checkboxes and the
+  format switch then filter `plan.files` locally (`lib/export.ts`).
+- **tasks.md** is disabled when the meeting has no action items. The spec only covered the notes
+  fallback.
+- **Default folder:** `dirs::document_dir()` + `fo-foca`. Without a documents folder it's `~/fo-foca`,
+  not bare `~`.
+- **Front matter `duration`** is a quoted clock string (`"11:04"`, `"1:02:05"`). Pause lines read
+  `— pausa de N min —` in pt (`— paused N min —` otherwise), with at least 1 min; a pause that never
+  resumed reads `— paused —`.
+- **Zip:** it is built from the finished temp folder **before** the rename, so a cancel while zipping
+  leaves nothing behind. Entries sit under `<name>/` in the archive and are dated at export time.
+  The folder name is re-checked right before the rename, in case something took it meanwhile.
+- **Cancel** is checked between files and every 1 MB in the copy and zip loops. Progress events go
+  out at each file and every 4 MB.
+- **Additions:** only one export runs at a time ("An export is already running").
+  `open_export_folder` opens only folders exported in this session (and only directories), so the
+  web view can't use the opener on arbitrary paths. `Jobs::is_pending(id)` was added so
+  `export_meeting` can refuse a meeting with a queued or running job. App.svelte announces a
+  finished or failed export when no export dialog is open (found in eval: leaving the meeting page
+  lost the notice).
+- **CLI:** without `--parts`, it exports every text part the meeting has and no audio (like the
+  dialog). `--to` defaults to the remembered folder. Only a successful dialog export updates the
+  remembered folder.
+- **UI vs the mock:**
+  - The native `<dialog>` backdrop also covers the sidebar.
+  - The deleted-audio reason drops "(Storage setting)", because audio can also be deleted by hand.
+  - The progress bar follows bytes, not steps.
+  - After Choose… the remember line says "fo-foca will remember this folder for the next export."
+  - `.seg` moved to `app.css` unchanged; the dialog's teal "on" state is a local override, as in the mock.
+- **Preview hooks:** `fake.ts` gained a third meeting with no notes, no summary and deleted audio.
+  `#export` opens the dialog on the main fake meeting and `#export-bare` on that one (preview only).
+
+### What was verified, and where
+- **Unit and end-to-end tests** (temp dirs, invented meetings only):
+  - Golden strings for every renderer in pt and en.
+  - The `folder_name` cases.
+  - Collision `(2)` for the folder and the zip.
+  - Deleted audio refused before anything is written.
+  - Import audio name.
+  - Zip listing (WAV stored, text deflated).
+  - Audio deleted mid-export still copied.
+  - Cancel while copying and while zipping leaves nothing.
+  - The `[export] dir` config round-trip and fallback.
+  - The Tauri refusal for the meeting being recorded or processed.
+  - The TS tree, sizes, defaults, progress text and the notice.
+
+  Final run: core 88 passed (3 ignored, as before), Tauri 5, UI 22. Clippy clean; svelte-check 0/0;
+  build ✓.
+- **CLI on an invented meeting** with scratch XDG dirs, not the real config or meetings: a
+  full export with `--format both --zip` wrote 6 files (3.8 MB, two 1.9 MB WAVs) plus the zip.
+  Re-runs gave `(2)` and `(3)` and left no temp files. The output was deleted afterwards. No real
+  meeting was exported.
+- **Browser preview** (`vite preview` + `fake.ts`, headless Chromium over CDP):
+  - form → audio + zip + Both tree → Choose… → progress → Exported → Open folder;
+  - reopen shows the remembered folder and `(2)`;
+  - Cancel returns to the form;
+  - the no-summary / no-tasks / deleted-audio states;
+  - the toast after leaving the meeting page mid-export.
+
+### Not verified
+- No `cargo tauri dev` run, so none of the spec's hand tests ran in the real app:
+  - the **native folder picker** (`pick_export_folder`);
+  - real `export` events in the web view;
+  - Open folder through **`tauri-plugin-opener`** (in dev, or inside the AppImage);
+  - exporting while recording another meeting;
+  - cancelling a large real export;
+  - the folder in the Files app.
+- No export of a real meeting (privacy), so there are no sizes or timings from real recordings.
+
+### Change division
+`CONTRIBUTING.md` is absent, so the split follows AGENTS.md's commit sequence:
+1. the spec-only PR #37;
+2. `todo → doing` on its own;
+3. one commit per concern: renderers + folder naming, `[export] dir`, the export run, a labelled
+   fix (SRT without word timings, zip dates), the CLI, the Tauri commands + opener, the
+   behavior-neutral `.seg` move before the dialog, the dialog + button + fakes, and the eval fix;
+4. this close-out.
+
+Every commit passed the full AGENTS.md checks and was pushed right after. One PR, stacked on #37.
+`Jobs::is_pending` rides in the Tauri commit, as the enabler of its one check.

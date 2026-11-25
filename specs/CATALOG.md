@@ -22,4 +22,4 @@
 | 018 | todo   | per-track-transcription     | —                                        | —     | mic and call transcribed separately; replaces mix + loudness guess |
 | 020 | done   | postcall-transcript         | moacyrricardo/spec-020-postcall-transcript-build | —     | after the call: mic and call transcribed separately; live kept; re-run button; imports same path |
 | 022 | done   | diarization-fixes           | moacyrricardo/spec-022-diarization-fixes-build | —     | ort optimizer corrupts CAM++ embeddings; segmentation timing drift; small-cluster cleanup, no forced merges, threshold 0.4 |
-| 023 | doing  | export-meeting              | moacyrricardo/spec-023-export-meeting-build | —     | mock in 023-assets; folder (+ optional zip) with transcript md/srt, notes, tasks, audio |
+| 023 | done   | export-meeting              | moacyrricardo/spec-023-export-meeting-build | —     | mock in 023-assets; folder (+ optional zip) with transcript md/srt, notes, tasks, audio |
