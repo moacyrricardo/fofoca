@@ -211,7 +211,8 @@
         if (h === "live" || h === "processing") {
           await start("Sync semanal — produto");
           if (h === "processing") setTimeout(() => api.stop(true).then(() => (screen = "processing")), 3000);
-        } else if (["meeting", "speakers", "transcript", "tasks"].includes(h)) open("2026-11-19-140200");
+        } else if (["meeting", "speakers", "transcript", "tasks", "export"].includes(h)) open("2026-11-19-140200");
+        else if (h === "export-bare") open("2026-11-17-163000"); // spec 023: no summary, audio deleted
         else if (h === "settings") screen = "settings";
         else if (h === "alltasks") screen = "tasks";
         else if (h === "import") importRecording();

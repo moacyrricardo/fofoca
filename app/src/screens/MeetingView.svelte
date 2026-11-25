@@ -9,6 +9,7 @@
   import LabelEditor from "./LabelEditor.svelte";
   import Player from "./Player.svelte";
   import MiniPlayer from "./MiniPlayer.svelte";
+  import ExportDialog from "./ExportDialog.svelte";
   import { load as loadAudio, play, player, seek, skip, toggle, unload as unloadAudio } from "../lib/player.svelte";
   import { lineAt, wordAt, wordTimes } from "../lib/replay";
 
@@ -92,6 +93,13 @@
   onDestroy(unloadAudio); // leaving the meeting page stops playback
 
 
+  // Export (spec 023): not while the meeting is recorded or processed.
+  let exportDialog = $state<ReturnType<typeof ExportDialog> | null>(null);
+  async function openExport() {
+    try { await exportDialog?.show(); }
+    catch (e) { notify(String(e), true); }
+  }
+
   let confirmDelete = $state(false);
   async function keepAudio(keep: boolean) {
     if (!meeting) return;
@@ -148,6 +156,7 @@
         }).catch((e) => { audio = "none"; notify(String(e), true); });
         if (firstLoad) tab = initialTab ?? (m.notes || m.summaries.some((s) => s.kind === "final") ? "summary" : "transcript");
         if (firstLoad && preview && ["#speakers", "#transcript", "#tasks"].includes(location.hash)) tab = location.hash.slice(1) as typeof tab; // browser preview only
+        if (firstLoad && preview && location.hash.startsWith("#export")) tick().then(openExport); // browser preview only
       }
     }).catch((e) => notify(String(e), true));
     return () => { current = false; };
@@ -213,7 +222,12 @@
   {#if !meeting}
     <p class="faint">Loading…</p>
   {:else}
-    <h1>{meeting.meta.title}</h1>
+    <div class="titlerow">
+      <h1>{meeting.meta.title}</h1>
+      <button class="btn ghost sm exportbtn" onclick={openExport} disabled={processing || recording}
+        title={recording ? "This meeting is still recording" : processing ? "Wait for the processing to finish" : "Save the transcript, notes, tasks and audio to a folder"}>⤓ Export</button>
+    </div>
+    <ExportDialog bind:this={exportDialog} {meeting} {notify} />
     <div class="muted small">
       {when(meeting.meta.started_at)} · {minutes(meeting.meta.duration_s)} · {meeting.segments.length} lines
       {#if !meeting.meta.finished}<span class="chip">unfinished</span>{/if}
@@ -373,6 +387,9 @@
   .back { background: none; border: 0; color: var(--ink-3); cursor: pointer; padding: 0; margin-bottom: 10px; font-weight: 700; }
   .back:hover { color: var(--ink); }
   .small { font-size: 13px; }
+  .titlerow { display: flex; align-items: flex-start; gap: 16px; }
+  .titlerow h1 { flex: 1; }
+  .exportbtn { margin-top: 2px; }
   .mlabels { margin-top: 10px; }
   .importing { display: flex; gap: 12px; align-items: center; margin-top: 12px; max-width: 760px; }
   .audio { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
