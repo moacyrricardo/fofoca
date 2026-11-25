@@ -99,9 +99,6 @@
   .fchip:hover { border-color: var(--teal); color: var(--ink); }
   .fchip.on { background: #1d4652; border-color: var(--teal); color: var(--ink); }
   .fchip.on span { color: var(--ink-2); }
-  .seg { display: flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; flex: none; }
-  .seg button { background: none; border: 0; color: var(--ink-2); font-weight: 700; font-size: 12.5px; padding: 5px 11px; cursor: pointer; }
-  .seg button.on { background: var(--navy-3); color: var(--ink); }
   .group { background: var(--navy-2); border: 1px solid var(--line); border-radius: 14px; padding: 6px 14px; margin-bottom: 12px; }
   .ghead { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; width: 100%; background: none; border: 0; border-bottom: 1px solid #22405c; color: var(--ink); padding: 8px 0; cursor: pointer; text-align: left; font-size: 14px; }
   .ghead:hover b { color: var(--teal); }

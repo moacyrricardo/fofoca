@@ -17,6 +17,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["image-png", "tray-icon"] }
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
+# Open an exported folder in the file manager (spec 023); called from Rust only.
+tauri-plugin-opener = "2"
 serde.workspace = true
 serde_json.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

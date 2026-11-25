@@ -26,6 +26,8 @@
 //!                                           import a recording made elsewhere (spec 012)
 //! fofoca-cli retention [--dry-run]          delete meeting audio per the [audio] policy
 //! fofoca-cli label <meeting-id> add|rm <label>
+//! fofoca-cli export <id> [--to DIR] [--parts transcript,notes,tasks,audio] [--format md|srt|both] [--zip]
+//!                                           export a meeting to a folder (spec 023)
 //! fofoca-cli calendar <list|add LINK|PATH|remove ID|upcoming [DAYS]|labels ID [LABEL…]>
 //! ```
 
@@ -94,6 +96,7 @@ fn run() -> Result<()> {
         }
         Some("label") => label(&store, &args[1..]),
         Some("import") => import(&cfg, &store, &args[1..]),
+        Some("export") => export(&cfg, &store, &args[1..]),
         Some("retention") => {
             let dry = args.iter().any(|a| a == "--dry-run");
             let done = fofoca_core::retention::apply(&store, &cfg.audio, chrono::Local::now().fixed_offset(), None, dry)?;
@@ -104,7 +107,11 @@ fn run() -> Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("usage: fofoca-cli <config|transcribe|record|summarize|list|labels|label|calendar> …");
+            eprintln!(
+                "usage: fofoca-cli <config|transcribe|bench-latency|record|transcript|retranscribe|summarize|diarize|notes|\
+                 eval-notes|diarize-wav|diarize-mix|diarize-score|list|labels|label|import|export|retention|calendar> …\n\
+                 (details at the top of src/bin/fofoca-cli.rs)"
+            );
             Ok(())
         }
     }
@@ -561,6 +568,55 @@ fn import(cfg: &Config, store: &Store, args: &[String]) -> Result<()> {
         Some(n) => println!("{}", fofoca_core::notes::to_markdown(n, &cfg.language)),
         None => println!("{}", prompts::transcript_text(&m.segments, &m.speakers, &cfg.language)),
     }
+    Ok(())
+}
+
+/// Export a meeting to a folder (spec 023), with the same code as the app. Without `--parts`,
+/// every text part the meeting has; audio only when asked for.
+fn export(cfg: &Config, store: &Store, args: &[String]) -> Result<()> {
+    use fofoca_core::export::{self, ExportOptions, ExportStep, TranscriptFormat};
+    const USAGE: &str = "usage: export <id> [--to DIR] [--parts transcript,notes,tasks,audio] [--format md|srt|both] [--zip]";
+    let id = args.first().filter(|a| !a.starts_with("--")).context(USAGE)?;
+    let flag = |name: &str| args.iter().position(|a| a == name).map(|i| args.get(i + 1).context(USAGE)).transpose();
+    for a in args.iter().skip(1).filter(|a| a.starts_with("--")) {
+        if !["--to", "--parts", "--format", "--zip"].contains(&a.as_str()) {
+            bail!("unknown option {a}\n{USAGE}");
+        }
+    }
+    let format = match flag("--format")?.map(String::as_str) {
+        None | Some("md") => TranscriptFormat::Markdown,
+        Some("srt") => TranscriptFormat::Srt,
+        Some("both") => TranscriptFormat::Both,
+        Some(other) => bail!("unknown format {other}\n{USAGE}"),
+    };
+    let dest = flag("--to")?.map(std::path::PathBuf::from).unwrap_or_else(|| cfg.export_dir().0);
+    let mut opts = ExportOptions { transcript: Some(format), notes: true, tasks: true, audio: false, zip: args.iter().any(|a| a == "--zip"), dest };
+    match flag("--parts")? {
+        Some(list) => {
+            let parts: Vec<&str> = list.split(',').map(str::trim).collect();
+            if let Some(bad) = parts.iter().find(|p| !["transcript", "notes", "tasks", "audio"].contains(p)) {
+                bail!("unknown part {bad}\n{USAGE}");
+            }
+            opts.transcript = parts.contains(&"transcript").then_some(format);
+            (opts.notes, opts.tasks, opts.audio) = (parts.contains(&"notes"), parts.contains(&"tasks"), parts.contains(&"audio"));
+        }
+        None => {
+            let p = export::plan(store, cfg, id, &opts)?.parts;
+            opts.transcript = (p.transcript_lines > 0).then_some(format);
+            (opts.notes, opts.tasks) = (p.notes.is_some(), p.tasks > 0);
+        }
+    }
+    let progress = |p: export::ExportProgress| {
+        let verb = match p.step { ExportStep::Writing => "writing", ExportStep::Copying => "copying", ExportStep::Zipping => "zipping" };
+        eprint!("\r{verb} {:<40} {:3.0}%   ", p.file, if p.total == 0 { 100.0 } else { p.done as f64 * 100.0 / p.total as f64 });
+    };
+    let done = export::run(store, cfg, id, &opts, &progress, &std::sync::atomic::AtomicBool::new(false))?;
+    eprintln!();
+    println!("{}", done.folder.display());
+    if let Some(z) = &done.zip {
+        println!("{}", z.display());
+    }
+    eprintln!("{} file(s), {:.1} MB", done.files, done.bytes as f64 / 1e6);
     Ok(())
 }
 

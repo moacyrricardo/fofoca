@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, onJob, onQuitRequested, onSession, preview } from "./lib/api";
+  import { api, onExport, onJob, onQuitRequested, onSession, preview } from "./lib/api";
+  import { exportNotice } from "./lib/export";
   import { live, resetLive } from "./lib/live.svelte";
   import type { CalendarEvent, ConfigView, JobEvent, MeetingMeta, SessionEvent } from "./lib/types";
   import { shortModel } from "./lib/format";
@@ -196,6 +197,11 @@
     onSession(handle).then((u) => (unlisten = u));
     let unlistenJobs: (() => void) | undefined;
     onJob(onJobEvent).then((u) => (unlistenJobs = u));
+    // spec 023: an export keeps running when its dialog is closed or the meeting page is left
+    const exportListener = onExport((e) => {
+      const n = exportNotice(e, !!document.querySelector("dialog[data-export][open]"));
+      if (n) notify(n.text, n.error);
+    });
     refresh();
     api.config().then((c) => (config = c)).catch((e) => notify(String(e), true));
     api.activeSession().then((m) => {
@@ -211,7 +217,8 @@
         if (h === "live" || h === "processing") {
           await start("Sync semanal — produto");
           if (h === "processing") setTimeout(() => api.stop(true).then(() => (screen = "processing")), 3000);
-        } else if (["meeting", "speakers", "transcript", "tasks"].includes(h)) open("2026-11-19-140200");
+        } else if (["meeting", "speakers", "transcript", "tasks", "export"].includes(h)) open("2026-11-19-140200");
+        else if (h === "export-bare") open("2026-11-17-163000"); // spec 023: no summary, audio deleted
         else if (h === "settings") screen = "settings";
         else if (h === "alltasks") screen = "tasks";
         else if (h === "import") importRecording();
@@ -219,6 +226,7 @@
     }
     return () => {
       quitListener.then((unlisten) => unlisten());
+      exportListener.then((unlisten) => unlisten());
       unlisten?.();
       unlistenJobs?.();
       clearInterval(calTimer);

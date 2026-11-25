@@ -1,7 +1,7 @@
 // Scripted stand-in for the Rust backend, used only outside Tauri (browser preview).
 
 import { normalizeLabels } from "./format";
-import type { DownloadEvent, JobEvent, ModelsView, Workflow, WorkflowView } from "./types";
+import type { DownloadEvent, ExportEvent, ExportOptions, ExportPlan, JobEvent, ModelsView, PlannedFile, Workflow, WorkflowView } from "./types";
 import type { CalendarEvent, CalendarSettings, ConfigView, Meeting, MeetingMeta, Segment, SessionEvent } from "./types";
 
 const LINES: [string, "you" | "call"][] = [
@@ -52,11 +52,15 @@ const meetings: Meeting[] = [
       { text: "Revisar os indicadores do trimestre antes da diretoria", owner: "Fernanda", due: "2026-11-21", refs: [8] },
       { text: "Marcar a conversa sobre o orçamento", owner: null, due: null, refs: [0] },
     ] } },
+  // No checked notes, no summary, audio deleted: the export dialog's disabled parts (spec 023).
+  { meta: { id: "2026-11-17-163000", title: "Conversa rápida 17/11", started_at: "2026-11-17T16:30:00-03:00", duration_s: 300, finished: true, labels: [], audio_deleted_at: "2026-11-18T09:00:00-03:00" }, segments: segs.slice(5, 8), summaries: [] },
 ];
 
 const config: ConfigView = {
   path: "~/.config/fofoca/config.toml",
   meetings_dir: "~/.local/share/fofoca/meetings",
+  export_dir: "/home/you/Documentos/fo-foca",
+  export_dir_remembered: false,
   whisper_model: "ggml-large-v3-turbo-q5_0",
   llm_model: "Qwen3.5-2B-Q4_K_M",
   config: {
@@ -165,6 +169,11 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
       }, 600 + i * 1100));
       return meta as T;
     }
+    case "pick_export_folder": return "/home/you/Desktop" as T;
+    case "export_plan": return fakePlan(String(args?.id), args?.options as ExportOptions) as T;
+    case "export_meeting": fakeExport(String(args?.id), args?.options as ExportOptions); return undefined as T;
+    case "cancel_export": if (exporting) exporting.cancelled = true; return undefined as T;
+    case "open_export_folder": console.log("open", args?.path); return undefined as T;
     case "storage": return { audio: audio, audio_bytes: 412_000_000, meetings_with_audio: 3 } as T;
     case "set_audio_policy": audio = args?.audio as typeof audio; return { audio, audio_bytes: audio.keep === "always" ? 412_000_000 : 120_000_000, meetings_with_audio: audio.keep === "always" ? 3 : 1 } as T;
     case "set_keep_audio": {
@@ -351,4 +360,78 @@ function fakeDownload(id: string) {
       emit({ id, done, total: entry.bytes, state: "done" });
     } else emit({ id, done, total: entry.bytes, state: "running" });
   }, 250);
+}
+
+// Meeting export (spec 023): plans from the fake meetings, a scripted run with progress and cancel.
+const takenFolders = new Set<string>();
+let exporting: { cancelled: boolean } | null = null;
+const exportListeners: ((e: ExportEvent) => void)[] = [];
+export function onExport(cb: (e: ExportEvent) => void): () => void {
+  exportListeners.push(cb);
+  return () => exportListeners.splice(exportListeners.indexOf(cb), 1);
+}
+
+function fakePlan(id: string, o: ExportOptions): ExportPlan {
+  const m = meetings.find((x) => x.meta.id === id) ?? meetings[0];
+  const title = m.meta.title.replace(/[\\/:*?"<>|]/g, "-").replace(/^[.\s]+|[.\s]+$/g, "") || "Meeting";
+  const base = `${m.meta.started_at.slice(0, 10)} ${title}`;
+  let name = base;
+  for (let n = 2; takenFolders.has(`${o.dest}/${name}`); n++) name = `${base} (${n})`;
+  const final = m.summaries.filter((s) => s.kind === "final").at(-1);
+  const notes = m.notes ? "checked" as const : final ? "summary" as const : null;
+  const tasks = m.notes?.action_items.length ?? 0;
+  const audio = !m.meta.audio_deleted_at && m.meta.finished && m.segments.length > 0;
+  const stem = m.meta.imported_from?.replace(/\.[^.]*$/, "");
+  const track = Math.round(m.meta.duration_s * 32_000); // 16 kHz, 16-bit mono
+  const all: PlannedFile[] = [
+    { part: "transcript_md", path: "transcript.md", bytes: 240 + m.segments.reduce((t, s) => t + s.text.length + 24, 0) },
+    { part: "transcript_srt", path: "transcript.srt", bytes: m.segments.reduce((t, s) => t + s.text.length + 48, 0) },
+    ...(notes ? [{ part: "notes" as const, path: "notes.md", bytes: notes === "checked" ? 1_400 : 300 + (final?.text.length ?? 0) }] : []),
+    ...(tasks ? [{ part: "tasks" as const, path: "tasks.md", bytes: 260 + tasks * 70 }] : []),
+    ...(audio ? (stem ? [{ part: "audio" as const, path: `audio/${stem}.wav`, bytes: track }] : [{ part: "audio" as const, path: "audio/mic.wav", bytes: track }, { part: "audio" as const, path: "audio/call.wav", bytes: track + 4_000 }]) : []),
+  ];
+  const files = all.filter((f) =>
+    f.part === "transcript_md" ? o.transcript === "markdown" || o.transcript === "both"
+    : f.part === "transcript_srt" ? o.transcript === "srt" || o.transcript === "both"
+    : f.part === "notes" ? o.notes : f.part === "tasks" ? o.tasks : o.audio);
+  return {
+    dest: o.dest, dest_display: o.dest.replace(/^\/home\/you/, "~"), folder_name: name, folder: `${o.dest}/${name}`,
+    zip: o.zip ? `${o.dest}/${name}.zip` : null, files,
+    parts: { transcript_lines: m.segments.length, notes, tasks, audio_tracks: audio ? (stem ? 1 : 2) : 0, audio_deleted_at: m.meta.audio_deleted_at ?? null, imported: !!stem },
+  };
+}
+
+function fakeExport(id: string, o: ExportOptions) {
+  if (live?.id === id) throw new Error("This meeting is still recording");
+  if (exporting) throw new Error("An export is already running");
+  const plan = fakePlan(id, o);
+  if (!plan.files.length) throw new Error("nothing to export: pick at least one part");
+  const job = (exporting = { cancelled: false });
+  const sum = plan.files.reduce((t, f) => t + f.bytes, 0);
+  const total = o.zip ? sum * 2 : sum;
+  // one tick per text file, a few per audio file and for the zip (like the mock's pacing)
+  const ticks: Omit<ExportEvent, "meeting_id" | "state" | "total" | "folder" | "zip" | "error">[] = [];
+  let done = 0;
+  for (const f of plan.files) {
+    const n = f.part === "audio" ? 4 : 1;
+    for (let i = 0; i < n; i++) { ticks.push({ step: f.part === "audio" ? "copying" : "writing", file: f.path, done }); done += f.bytes / n; }
+  }
+  if (o.zip) for (let i = 0; i < 4; i++) { ticks.push({ step: "zipping", file: `${plan.folder_name}.zip`, done }); done += sum / 4; }
+  const emit = (e: Partial<ExportEvent> & Pick<ExportEvent, "state">) =>
+    exportListeners.forEach((l) => l({ meeting_id: id, step: null, file: "", done: 0, total, folder: null, zip: null, error: null, ...e }));
+  let i = 0;
+  const tick = () => {
+    if (job.cancelled) { exporting = null; emit({ state: "cancelled" }); return; }
+    if (i >= ticks.length) {
+      exporting = null;
+      takenFolders.add(plan.folder);
+      config.export_dir = o.dest; config.export_dir_remembered = true;
+      emit({ state: "done", done: total, folder: plan.folder, zip: plan.zip });
+      return;
+    }
+    const t = ticks[i++];
+    emit({ state: "running", ...t, done: Math.round(t.done) });
+    window.setTimeout(tick, t.step === "writing" ? 300 : 450);
+  };
+  window.setTimeout(tick, 100);
 }
