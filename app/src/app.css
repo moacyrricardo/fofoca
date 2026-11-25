@@ -38,6 +38,10 @@ button { font-family: inherit; }
 @keyframes pulse { 50% { opacity: .35; } }
 .spin { width: 16px; height: 16px; border: 2.5px solid var(--line); border-top-color: var(--teal); border-radius: 50%; animation: sp .8s linear infinite; flex: none; }
 @keyframes sp { to { transform: rotate(360deg); } }
+/* segmented control (Tasks order, Export format) */
+.seg { display: flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; flex: none; }
+.seg button { background: none; border: 0; color: var(--ink-2); font-weight: 700; font-size: 12.5px; padding: 5px 11px; cursor: pointer; }
+.seg button.on { background: var(--navy-3); color: var(--ink); }
 .who { font-weight: 800; font-size: 12.5px; }
 .who.you { color: var(--teal); }
 .who.call { color: var(--coral); }
