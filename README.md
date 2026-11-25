@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  🚧 <em>Pre-alpha — runs from source on Linux. No installer yet.</em> 🚧
+  🚧 <em>Pre-alpha — Linux only. <a href="https://github.com/moacyrricardo/fofoca/releases">Test builds</a> (AppImage / .deb) are available; see <a href="#install">Install</a>.</em> 🚧
 </p>
 
 ---
@@ -110,9 +110,35 @@ using whisper.cpp and llama.cpp on Vulkan:
 - [ ] Calendar via private iCal link — in progress
 - [ ] Auto setup: hardware probe, layout planner, first-run benchmark
 - [ ] Grounded summaries and task extraction
-- [ ] Speaker separation after the call
+- [x] Speaker separation after the call
 - [ ] Desktop UI
-- [ ] Packaging (AppImage first), then Windows and macOS
+- [ ] Packaging: AppImage and .deb test builds are out; engines are not bundled yet ([spec 006](specs/006-todo-packaging-model-servers.md)). Then Windows and macOS
+
+## Install
+
+Linux x86-64, test builds only. Each build is a pre-release on the
+[Releases page](https://github.com/moacyrricardo/fofoca/releases); the first is
+[`v0.1.0-pr32`](https://github.com/moacyrricardo/fofoca/releases/tag/v0.1.0-pr32).
+
+1. Install the system pieces (Debian/Ubuntu names):
+   ```bash
+   sudo apt install pipewire-bin mesa-vulkan-drivers libwebkit2gtk-4.1-0
+   ```
+   With an NVIDIA GPU, use the NVIDIA driver, which includes Vulkan.
+2. Download the models and engines with [`scripts/fofoca-setup.sh`](scripts/fofoca-setup.sh)
+   (also attached to each release):
+   ```bash
+   ./fofoca-setup.sh                # default models (~1.9 GB) + engines
+   ./fofoca-setup.sh --small        # smaller models (~1.3 GB)
+   ./fofoca-setup.sh --models-only  # you already have whisper-server and llama-server
+   ```
+   - Everything goes to `~/.local/share/fofoca/`, where the default config looks.
+   - `llama-server` (llama.cpp, Vulkan) is downloaded.
+   - `whisper-server` is built from source, because whisper.cpp ships no Linux build. That needs
+     `sudo apt install git cmake build-essential glslc libvulkan-dev`.
+3. Run the AppImage (`chmod +x fo-foca_*.AppImage && ./fo-foca_*.AppImage`), or install the .deb
+   (`sudo apt install ./fo-foca_*_amd64.deb`).
+4. In **Settings → Models**, check that every row is green, and pick the GPU for each engine.
 
 ## Platforms
 
@@ -124,7 +150,8 @@ usable — NVIDIA, AMD or Intel — or CPU only.
 Requirements (Linux): Rust, Node 20+, the [Tauri prerequisites](https://tauri.app/start/prerequisites/)
 (WebKitGTK 4.1, GTK 3), PipeWire (`pw-record`), and a `whisper-server` (whisper.cpp) and
 `llama-server` (llama.cpp) build with their models. Bundling those is [spec 006](specs/006-todo-packaging-model-servers.md);
-until then, point `~/.config/fofoca/config.toml` (created on first run) at them.
+until then, run [`scripts/fofoca-setup.sh`](scripts/fofoca-setup.sh) or point
+`~/.config/fofoca/config.toml` (created on first run) at your own builds.
 
 ```bash
 cd app && npm install && cargo tauri dev     # desktop app
