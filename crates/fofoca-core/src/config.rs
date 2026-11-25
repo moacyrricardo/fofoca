@@ -28,6 +28,17 @@ pub struct Config {
     pub audio: AudioConfig,
     #[serde(default)]
     pub workflow: Workflow,
+    #[serde(default)]
+    pub export: ExportConfig,
+}
+
+/// Meeting export (spec 023).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ExportConfig {
+    /// The last folder a meeting was exported to; `~` is expanded on read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
 }
 
 /// GPU or CPU, for one model.
@@ -267,6 +278,7 @@ impl Default for Config {
             diarization: DiarizationConfig::default(),
             audio: AudioConfig::default(),
             workflow: Workflow::default(),
+            export: ExportConfig::default(),
         }
     }
 }
@@ -343,6 +355,28 @@ impl Config {
         })
     }
 
+    /// Remember the folder meetings are exported to (`[export] dir`), written with a leading `~`
+    /// when it is under the home folder, keeping the rest of the file as written.
+    pub fn save_export_dir(path: &Path, dir: &Path) -> Result<()> {
+        edit_file(path, |doc| {
+            if doc.get("export").is_none() {
+                doc["export"] = toml_edit::table();
+            }
+            doc["export"]["dir"] = toml_edit::value(collapse_home(dir));
+            Ok(())
+        })
+    }
+
+    /// Where the export dialog starts, and whether that is the remembered folder: the remembered
+    /// one while it still exists, else the documents folder (localized, e.g. `~/Documentos`) plus
+    /// `fo-foca`, or `~/fo-foca` without one.
+    pub fn export_dir(&self) -> (PathBuf, bool) {
+        match &self.export.dir {
+            Some(d) if d.is_dir() => (d.clone(), true),
+            _ => (default_export_dir(), false),
+        }
+    }
+
     /// Point one model (or engine) setting at a file, keeping the rest of the file as written.
     pub fn save_path(path: &Path, setting: ModelSetting, file: &Path) -> Result<()> {
         let (table, key) = setting.key();
@@ -392,6 +426,7 @@ impl Config {
         self.llm.server = expand(&self.llm.server);
         self.llm.model = expand(&self.llm.model);
         self.meetings_dir = self.meetings_dir.map(|p| expand(&p));
+        self.export.dir = self.export.dir.map(|p| expand(&p));
         self
     }
 
@@ -441,6 +476,20 @@ fn edit_file(path: &Path, f: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<
 
 fn model_name(p: &Path) -> String {
     p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// The export folder used until one is remembered (spec 023).
+pub fn default_export_dir() -> PathBuf {
+    dirs::document_dir().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from(".")).join("fo-foca")
+}
+
+/// `~/…` for a path under the home folder, for display and for config.toml.
+pub fn collapse_home(p: &Path) -> String {
+    match dirs::home_dir().and_then(|h| p.strip_prefix(h).ok().map(Path::to_path_buf)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => p.display().to_string(),
+    }
 }
 
 fn expand(p: &Path) -> PathBuf {
@@ -532,6 +581,39 @@ mod tests {
         doc["diarization"]["embedding_model"] = toml_edit::value("e");
         doc["diarization"]["threshold"] = toml_edit::value(0.55);
         assert_eq!(toml::from_str::<Config>(&doc.to_string()).unwrap().diarization.threshold, 0.55);
+    }
+
+    #[test]
+    fn export_dir_round_trips_and_falls_back_when_gone() {
+        let dir = std::env::temp_dir().join(format!("fofoca-cfg-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        Config::load_or_create_at(&path).unwrap();
+        std::fs::write(&path, format!("# keep me\n{}", std::fs::read_to_string(&path).unwrap())).unwrap();
+        let cfg = Config::load_or_create_at(&path).unwrap();
+        assert_eq!(cfg.export, ExportConfig::default(), "older files have no [export] table");
+        assert_eq!(cfg.export_dir(), (default_export_dir(), false));
+        assert!(default_export_dir().ends_with("fo-foca"));
+
+        let out = dir.join("Exports");
+        std::fs::create_dir_all(&out).unwrap();
+        Config::save_export_dir(&path, &out).unwrap();
+        let cfg = Config::load_or_create_at(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with("# keep me"));
+        assert_eq!(cfg.export_dir(), (out.clone(), true));
+
+        // a remembered folder that was removed falls back to the default
+        std::fs::remove_dir_all(&out).unwrap();
+        assert_eq!(Config::load_or_create_at(&path).unwrap().export_dir(), (default_export_dir(), false));
+
+        // under home: saved with ~ and expanded on read
+        let home = dirs::home_dir().unwrap();
+        Config::save_export_dir(&path, &home.join("Área de trabalho/fo-foca")).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("dir = \"~/Área de trabalho/fo-foca\""));
+        assert_eq!(Config::load_or_create_at(&path).unwrap().export.dir, Some(home.join("Área de trabalho/fo-foca")));
+        assert_eq!(collapse_home(&home), "~");
+        assert_eq!(collapse_home(Path::new("/srv/x")), "/srv/x");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
