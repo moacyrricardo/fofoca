@@ -4,8 +4,18 @@
 //! The renderers are pure functions of a loaded [`Meeting`] and the transcription language
 //! (decision 1): the files are written in the language the meeting was transcribed in.
 
+use std::fs::File;
+use std::io::{BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+use crate::config::{collapse_home, Config};
 use crate::grounding::Action;
 use crate::model::{Meeting, MeetingMeta, Pause, Segment, SummaryKind, Word};
+use crate::store::Store;
 use crate::speakers::display_name;
 use crate::whisper::approx_words;
 
@@ -257,6 +267,349 @@ pub fn tasks_md(m: &Meeting) -> Option<String> {
     Some(format!("{}{}\n", front_matter(&m.meta, None), lines.join("\n")))
 }
 
+// ------------------------------------------------------------------ the export run
+
+/// Which transcript files to write.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptFormat {
+    Markdown,
+    Srt,
+    Both,
+}
+
+/// What to export and where. `dest` is the folder the meeting's folder is created in.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ExportOptions {
+    pub transcript: Option<TranscriptFormat>,
+    pub notes: bool,
+    pub tasks: bool,
+    pub audio: bool,
+    pub zip: bool,
+    pub dest: PathBuf,
+}
+
+/// The part of the meeting a file comes from.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilePart {
+    TranscriptMd,
+    TranscriptSrt,
+    Notes,
+    Tasks,
+    Audio,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct PlannedFile {
+    pub part: FilePart,
+    /// Relative to the meeting's folder, `/`-separated (`audio/mic.wav`).
+    pub path: String,
+    pub bytes: u64,
+}
+
+/// What this meeting can export, whatever was picked: the dialog greys out the rest with the reason.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Parts {
+    pub transcript_lines: usize,
+    /// `None`: no checked notes and no final summary ("No summary for this meeting").
+    pub notes: Option<NotesSource>,
+    pub tasks: usize,
+    /// Audio tracks on disk (0 when deleted, spec 011, or never kept).
+    pub audio_tracks: usize,
+    pub audio_deleted_at: Option<String>,
+    pub imported: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ExportPlan {
+    pub dest: PathBuf,
+    /// `dest` with `~` for the home folder.
+    pub dest_display: String,
+    /// The meeting's folder name, with the `(2)` suffix when that name is taken.
+    pub folder_name: String,
+    pub folder: PathBuf,
+    pub zip: Option<PathBuf>,
+    /// The files the options pick, with their sizes.
+    pub files: Vec<PlannedFile>,
+    pub parts: Parts,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportStep {
+    Writing,
+    Copying,
+    Zipping,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ExportProgress {
+    pub step: ExportStep,
+    /// The file being written (relative), or the zip's name.
+    pub file: String,
+    /// Bytes written so far and in all (the zip counts its files again).
+    pub done: u64,
+    pub total: u64,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ExportDone {
+    pub folder: PathBuf,
+    pub zip: Option<PathBuf>,
+    pub files: usize,
+    pub bytes: u64,
+}
+
+/// The export was cancelled (decision 15); everything it wrote is gone.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("export cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+pub fn is_cancelled(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Cancelled>().is_some()
+}
+
+enum Source {
+    Text(String),
+    File(PathBuf),
+}
+
+struct Entry {
+    file: PlannedFile,
+    source: Source,
+}
+
+/// What the meeting can export, and the entries the options pick, rendered from one snapshot.
+fn entries(store: &Store, m: &Meeting, language: &str, opts: &ExportOptions) -> Result<(Vec<Entry>, Parts)> {
+    let tracks = store.audio_tracks(&m.meta.id)?;
+    let imported = m.meta.imported_from.is_some();
+    let mut audio: Vec<(String, PathBuf)> = Vec::new();
+    if m.meta.audio_deleted_at.is_none() {
+        // Imports keep their single track under the original file name (decision 14).
+        let stem = m.meta.imported_from.as_deref().and_then(|f| Path::new(f).file_stem()).map(|s| safe_name(&s.to_string_lossy(), TITLE_BYTES)).filter(|s| !s.is_empty());
+        if let Some(p) = tracks.mic {
+            audio.push(("audio/mic.wav".into(), p));
+        }
+        if let Some(p) = tracks.call {
+            audio.push((format!("audio/{}.wav", if imported { stem.as_deref().unwrap_or("call") } else { "call" }), p));
+        }
+    }
+    let notes = notes_md(m, language);
+    let tasks = tasks_md(m);
+    let parts = Parts {
+        transcript_lines: m.segments.len(),
+        notes: notes_source(m),
+        tasks: m.notes.as_ref().map_or(0, |n| n.action_items.len()),
+        audio_tracks: audio.len(),
+        audio_deleted_at: m.meta.audio_deleted_at.clone(),
+        imported,
+    };
+    let text = |part, path: &str, s: String| Entry { file: PlannedFile { part, path: path.into(), bytes: s.len() as u64 }, source: Source::Text(s) };
+    let mut out = Vec::new();
+    if matches!(opts.transcript, Some(TranscriptFormat::Markdown | TranscriptFormat::Both)) {
+        out.push(text(FilePart::TranscriptMd, "transcript.md", transcript_md(m, language)));
+    }
+    if matches!(opts.transcript, Some(TranscriptFormat::Srt | TranscriptFormat::Both)) {
+        out.push(text(FilePart::TranscriptSrt, "transcript.srt", transcript_srt(m, language)));
+    }
+    if opts.notes {
+        if let Some(s) = notes {
+            out.push(text(FilePart::Notes, "notes.md", s));
+        }
+    }
+    if opts.tasks {
+        if let Some(s) = tasks {
+            out.push(text(FilePart::Tasks, "tasks.md", s));
+        }
+    }
+    if opts.audio {
+        for (path, src) in audio {
+            let bytes = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
+            out.push(Entry { file: PlannedFile { part: FilePart::Audio, path, bytes }, source: Source::File(src) });
+        }
+    }
+    Ok((out, parts))
+}
+
+fn name_taken(dest: &Path, name: &str) -> bool {
+    dest.join(name).exists() || dest.join(format!("{name}.zip")).exists()
+}
+
+/// `base`, or `base (2)`, `(3)`… when a folder or zip of that name already exists in `dest`
+/// (decision 10).
+pub fn unique_name(dest: &Path, base: &str) -> String {
+    let mut name = base.to_string();
+    let mut n = 1;
+    while name_taken(dest, &name) {
+        n += 1;
+        name = format!("{base} ({n})");
+    }
+    name
+}
+
+/// What an export with these options would write, without writing anything.
+pub fn plan(store: &Store, cfg: &Config, id: &str, opts: &ExportOptions) -> Result<ExportPlan> {
+    let m = store.load(id)?;
+    let (entries, parts) = entries(store, &m, &cfg.language, opts)?;
+    let folder_name = unique_name(&opts.dest, &folder_name(&m.meta));
+    Ok(ExportPlan {
+        dest: opts.dest.clone(),
+        dest_display: collapse_home(&opts.dest),
+        folder: opts.dest.join(&folder_name),
+        zip: opts.zip.then(|| opts.dest.join(format!("{folder_name}.zip"))),
+        folder_name,
+        files: entries.into_iter().map(|e| e.file).collect(),
+        parts,
+    })
+}
+
+/// Removes what an unfinished export wrote, unless disarmed.
+struct Cleanup(Vec<PathBuf>);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(p);
+            } else if p.exists() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+}
+
+const CHUNK: usize = 1 << 20;
+
+/// Copy in 1 MB chunks, checking `cancel` between them.
+fn copy(from: &mut impl Read, to: &mut impl Write, cancel: &AtomicBool, mut on_chunk: impl FnMut(u64)) -> Result<u64> {
+    let mut buf = vec![0u8; CHUNK];
+    let mut total = 0;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Cancelled.into());
+        }
+        let n = from.read(&mut buf)?;
+        if n == 0 {
+            return Ok(total);
+        }
+        to.write_all(&buf[..n])?;
+        total += n as u64;
+        on_chunk(n as u64);
+    }
+}
+
+/// Export a meeting: render from one snapshot, open the audio files before writing anything, write
+/// into a hidden temp folder in `dest`, zip from it when asked, then rename both into place. On
+/// error or cancel, the temp folder and the partial zip are removed.
+pub fn run(store: &Store, cfg: &Config, id: &str, opts: &ExportOptions, progress: &dyn Fn(ExportProgress), cancel: &AtomicBool) -> Result<ExportDone> {
+    let m = store.load(id)?;
+    let (entries, parts) = entries(store, &m, &cfg.language, opts)?;
+    anyhow::ensure!(!opts.notes || parts.notes.is_some(), "this meeting has no summary or checked notes");
+    anyhow::ensure!(!opts.tasks || parts.tasks > 0, "this meeting has no tasks");
+    anyhow::ensure!(!opts.audio || parts.audio_tracks > 0, "this meeting's audio isn't kept");
+    anyhow::ensure!(!entries.is_empty(), "nothing to export: pick at least one part");
+    // Opened first: deleting the audio (spec 011) during the export can't break the copy.
+    let mut handles = Vec::new();
+    for e in &entries {
+        handles.push(match &e.source {
+            Source::File(p) => Some(File::open(p).with_context(|| format!("opening {}", p.display()))?),
+            Source::Text(_) => None,
+        });
+    }
+    std::fs::create_dir_all(&opts.dest).with_context(|| format!("creating {}", opts.dest.display()))?;
+    let base = folder_name(&m.meta);
+    let name = unique_name(&opts.dest, &base);
+    let tmp = opts.dest.join(format!(".{name}.fofoca-export-{}", std::process::id()));
+    let part = opts.dest.join(format!("{name}.zip.part"));
+    let mut cleanup = Cleanup(vec![tmp.clone(), part.clone()]);
+    if tmp.exists() {
+        std::fs::remove_dir_all(&tmp)?;
+    }
+    std::fs::create_dir_all(tmp.join("audio"))?;
+
+    let files: u64 = entries.iter().map(|e| e.file.bytes).sum();
+    let total = if opts.zip { files * 2 } else { files };
+    let done = std::cell::Cell::new(0u64);
+    let report = |step, file: &str| progress(ExportProgress { step, file: file.into(), done: done.get(), total });
+    for (e, handle) in entries.iter().zip(handles.iter_mut()) {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Cancelled.into());
+        }
+        let path = tmp.join(&e.file.path);
+        match (&e.source, handle) {
+            (Source::Text(s), _) => {
+                report(ExportStep::Writing, &e.file.path);
+                std::fs::write(&path, s).with_context(|| format!("writing {}", path.display()))?;
+                done.set(done.get() + e.file.bytes);
+            }
+            (Source::File(_), Some(f)) => {
+                report(ExportStep::Copying, &e.file.path);
+                let mut out = BufWriter::new(File::create(&path).with_context(|| format!("writing {}", path.display()))?);
+                let mut since = 0;
+                copy(f, &mut out, cancel, |n| {
+                    done.set(done.get() + n);
+                    since += n;
+                    if since >= 4 * CHUNK as u64 {
+                        since = 0;
+                        report(ExportStep::Copying, &e.file.path);
+                    }
+                })?;
+                out.flush()?;
+            }
+            (Source::File(_), None) => unreachable!("audio handles are opened above"),
+        }
+    }
+    if !entries.iter().any(|e| e.file.part == FilePart::Audio) {
+        std::fs::remove_dir(tmp.join("audio"))?;
+    }
+
+    if opts.zip {
+        let zip_name = format!("{name}.zip");
+        report(ExportStep::Zipping, &zip_name);
+        let mut zip = zip::ZipWriter::new(BufWriter::new(File::create(&part)?));
+        let mut since = 0;
+        for e in &entries {
+            let method = if e.file.path.ends_with(".wav") { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
+            let options = zip::write::SimpleFileOptions::default().compression_method(method).large_file(e.file.bytes >= u32::MAX as u64);
+            zip.start_file(format!("{name}/{}", e.file.path), options)?;
+            copy(&mut File::open(tmp.join(&e.file.path))?, &mut zip, cancel, |n| {
+                done.set(done.get() + n);
+                since += n;
+                if since >= 4 * CHUNK as u64 {
+                    since = 0;
+                    report(ExportStep::Zipping, &zip_name);
+                }
+            })?;
+        }
+        zip.finish()?.flush()?;
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Cancelled.into());
+    }
+
+    // Something may have taken the name meanwhile: pick again, the zip follows.
+    let name = if name_taken(&opts.dest, &name) { unique_name(&opts.dest, &base) } else { name };
+    let folder = opts.dest.join(&name);
+    std::fs::rename(&tmp, &folder).with_context(|| format!("moving the export to {}", folder.display()))?;
+    let zip = if opts.zip {
+        let z = opts.dest.join(format!("{name}.zip"));
+        std::fs::rename(&part, &z)?;
+        Some(z)
+    } else {
+        None
+    };
+    cleanup.0.clear();
+    Ok(ExportDone { folder, zip, files: entries.len(), bytes: files })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +792,208 @@ mod tests {
         m.notes = Some(notes());
         let want = format!("{HEAD}---\n\n# Planejamento do lançamento\n\n- [ ] Enviar o convite — Ana · 2026-11-27 [03:05]\n- [ ] Revisar os preços [05:58]\n");
         assert_eq!(tasks_md(&m).unwrap(), want);
+    }
+
+    // ---------------------------------------------------------------- end to end, in temp dirs
+
+    struct Fixture {
+        root: PathBuf,
+        store: Store,
+        cfg: Config,
+    }
+
+    impl Fixture {
+        fn new(name: &str) -> Fixture {
+            let root = std::env::temp_dir().join(format!("fofoca-export-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            Fixture { store: Store::new(root.join("meetings")).unwrap(), root, cfg: Config::default() }
+        }
+
+        /// A finished recording with two lines, checked notes and, when asked, both audio tracks.
+        fn meeting(&self, title: &str, audio: bool, imported_from: Option<&str>) -> String {
+            let info = crate::model::StartInfo { title: title.into(), started_at: Some("2026-11-20T14:15:00-03:00".into()), imported_from: imported_from.map(str::to_string), ..Default::default() };
+            let id = self.store.create(&info).unwrap().id;
+            self.store.append_segment(&id, &seg(1.0, 3.0, "Bom dia.", Track::You, None)).unwrap();
+            self.store.append_segment(&id, &seg(4.0, 6.0, "Oi!", Track::Call, None)).unwrap();
+            self.store.save_notes(&id, &notes()).unwrap();
+            self.store.update_meta(&id, |m| { m.finished = true; m.duration_s = 664.0 }).unwrap();
+            if audio {
+                if imported_from.is_none() {
+                    std::fs::write(self.store.dir(&id).join("mic.wav"), wav(3 * CHUNK + 17, 1)).unwrap();
+                }
+                std::fs::write(self.store.dir(&id).join("system.wav"), wav(CHUNK / 2, 2)).unwrap();
+            }
+            id
+        }
+
+        fn dest(&self) -> PathBuf {
+            self.root.join("Documentos/fo-foca")
+        }
+
+        fn opts(&self, zip: bool) -> ExportOptions {
+            ExportOptions { transcript: Some(TranscriptFormat::Both), notes: true, tasks: true, audio: true, zip, dest: self.dest() }
+        }
+
+        fn listing(&self) -> Vec<String> {
+            let mut out: Vec<String> = std::fs::read_dir(self.dest()).map(|d| d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+            out.sort();
+            out
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn wav(len: usize, fill: u8) -> Vec<u8> {
+        let mut v = b"RIFF".to_vec();
+        v.resize(len, fill);
+        v
+    }
+
+    fn files_in(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() {
+                out.extend(files_in(&e.path()).into_iter().map(|f| format!("{name}/{f}")));
+            } else {
+                out.push(name);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn exports_a_folder_and_a_zip_then_a_second_export_gets_a_suffix() {
+        let f = Fixture::new("full");
+        let id = f.meeting("Sync 20/11", true, None);
+        let plan = plan(&f.store, &f.cfg, &id, &f.opts(true)).unwrap();
+        assert_eq!(plan.folder_name, "2026-11-20 Sync 20-11");
+        assert_eq!(plan.zip, Some(f.dest().join("2026-11-20 Sync 20-11.zip")));
+        let paths: Vec<&str> = plan.files.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, ["transcript.md", "transcript.srt", "notes.md", "tasks.md", "audio/mic.wav", "audio/call.wav"]);
+        assert_eq!(plan.files[4].bytes, (3 * CHUNK + 17) as u64);
+        assert_eq!(plan.parts, Parts { transcript_lines: 2, notes: Some(NotesSource::Checked), tasks: 2, audio_tracks: 2, audio_deleted_at: None, imported: false });
+        assert!(!f.dest().exists(), "planning writes nothing");
+
+        let events = std::cell::RefCell::new(Vec::new());
+        let done = run(&f.store, &f.cfg, &id, &f.opts(true), &|p| events.borrow_mut().push(p), &AtomicBool::new(false)).unwrap();
+        assert_eq!(done.folder, plan.folder);
+        assert_eq!(files_in(&done.folder), ["audio/call.wav", "audio/mic.wav", "notes.md", "tasks.md", "transcript.md", "transcript.srt"]);
+        assert_eq!(std::fs::read(done.folder.join("audio/mic.wav")).unwrap(), wav(3 * CHUNK + 17, 1), "copied as stored");
+        let meeting = f.store.load(&id).unwrap();
+        assert_eq!(std::fs::read_to_string(done.folder.join("transcript.md")).unwrap(), transcript_md(&meeting, "pt"));
+        assert_eq!(f.listing(), ["2026-11-20 Sync 20-11", "2026-11-20 Sync 20-11.zip"], "no temp folder or .part left");
+
+        // the zip holds the folder: WAV stored, text deflated
+        let mut z = zip::ZipArchive::new(File::open(done.zip.as_ref().unwrap()).unwrap()).unwrap();
+        let mut names: Vec<(String, zip::CompressionMethod)> = (0..z.len()).map(|i| { let e = z.by_index(i).unwrap(); (e.name().to_string(), e.compression()) }).collect();
+        names.sort_by(|a, b| a.0.cmp(&b.0));
+        let (s, d) = (zip::CompressionMethod::Stored, zip::CompressionMethod::Deflated);
+        let n = |p: &str| format!("2026-11-20 Sync 20-11/{p}");
+        assert_eq!(names, [(n("audio/call.wav"), s), (n("audio/mic.wav"), s), (n("notes.md"), d), (n("tasks.md"), d), (n("transcript.md"), d), (n("transcript.srt"), d)]);
+        let mut notes = String::new();
+        z.by_name(&n("notes.md")).unwrap().read_to_string(&mut notes).unwrap();
+        assert_eq!(notes, notes_md(&meeting, "pt").unwrap());
+
+        // progress: files in order, then the zip; bytes never go back and end at the total
+        let events = events.into_inner();
+        let steps: Vec<(ExportStep, &str)> = events.iter().map(|e| (e.step, e.file.as_str())).collect();
+        assert_eq!(steps.first(), Some(&(ExportStep::Writing, "transcript.md")));
+        assert!(steps.contains(&(ExportStep::Copying, "audio/mic.wav")));
+        assert_eq!(steps.last().unwrap().0, ExportStep::Zipping);
+        assert!(events.windows(2).all(|w| w[0].done <= w[1].done));
+        let total: u64 = plan.files.iter().map(|p| p.bytes).sum();
+        assert!(events.iter().all(|e| e.total == 2 * total));
+
+        // exporting again doesn't touch the first one
+        let again = plan_and_run(&f, &id, true);
+        assert_eq!(again.folder, f.dest().join("2026-11-20 Sync 20-11 (2)"));
+        assert_eq!(again.zip, Some(f.dest().join("2026-11-20 Sync 20-11 (2).zip")));
+        // a zip alone also takes the name
+        std::fs::rename(&done.folder, f.root.join("moved")).unwrap();
+        assert_eq!(super::plan(&f.store, &f.cfg, &id, &f.opts(false)).unwrap().folder_name, "2026-11-20 Sync 20-11 (3)");
+    }
+
+    fn plan_and_run(f: &Fixture, id: &str, zip: bool) -> ExportDone {
+        let p = plan(&f.store, &f.cfg, id, &f.opts(zip)).unwrap();
+        let done = run(&f.store, &f.cfg, id, &f.opts(zip), &|_| {}, &AtomicBool::new(false)).unwrap();
+        assert_eq!(done.folder, p.folder);
+        done
+    }
+
+    #[test]
+    fn deleted_audio_and_missing_parts() {
+        let f = Fixture::new("noaudio");
+        let id = f.meeting("Sem áudio", true, None);
+        crate::retention::delete_audio(&f.store, &id).unwrap();
+        let p = plan(&f.store, &f.cfg, &id, &f.opts(false)).unwrap();
+        assert_eq!((p.parts.audio_tracks, p.parts.audio_deleted_at.is_some()), (0, true));
+        assert!(p.files.iter().all(|x| x.part != FilePart::Audio));
+        let err = run(&f.store, &f.cfg, &id, &f.opts(false), &|_| {}, &AtomicBool::new(false)).unwrap_err();
+        assert!(err.to_string().contains("audio"), "{err}");
+        assert!(f.listing().is_empty(), "a refused export writes nothing");
+
+        let text_only = ExportOptions { audio: false, ..f.opts(false) };
+        let done = run(&f.store, &f.cfg, &id, &text_only, &|_| {}, &AtomicBool::new(false)).unwrap();
+        assert_eq!(files_in(&done.folder), ["notes.md", "tasks.md", "transcript.md", "transcript.srt"], "no empty audio/ folder");
+
+        // no summary and no notes: notes.md can't be asked for
+        let bare = f.store.create(&crate::model::StartInfo { title: "Rápida".into(), ..Default::default() }).unwrap().id;
+        let p = plan(&f.store, &f.cfg, &bare, &f.opts(false)).unwrap();
+        assert_eq!((p.parts.notes, p.parts.tasks, p.parts.audio_tracks, p.parts.audio_deleted_at.clone()), (None, 0, 0, None));
+        assert!(run(&f.store, &f.cfg, &bare, &ExportOptions { audio: false, tasks: false, ..f.opts(false) }, &|_| {}, &AtomicBool::new(false)).is_err());
+        let nothing = ExportOptions { transcript: None, notes: false, tasks: false, audio: false, ..f.opts(false) };
+        assert!(run(&f.store, &f.cfg, &bare, &nothing, &|_| {}, &AtomicBool::new(false)).is_err());
+    }
+
+    #[test]
+    fn an_import_exports_its_track_under_the_original_name() {
+        let f = Fixture::new("import");
+        let id = f.meeting("Cliente", true, Some("Gravação: cliente BH.m4a"));
+        let p = plan(&f.store, &f.cfg, &id, &f.opts(false)).unwrap();
+        assert!(p.parts.imported);
+        let audio: Vec<&str> = p.files.iter().filter(|x| x.part == FilePart::Audio).map(|x| x.path.as_str()).collect();
+        assert_eq!(audio, ["audio/Gravação- cliente BH.wav"]);
+        let done = plan_and_run(&f, &id, false);
+        assert!(done.folder.join("audio/Gravação- cliente BH.wav").is_file());
+    }
+
+    #[test]
+    fn audio_deleted_during_the_export_is_still_copied() {
+        let f = Fixture::new("racing");
+        let id = f.meeting("Corrida", true, None);
+        let dir = f.store.dir(&id);
+        // the first progress event comes after the audio files were opened
+        let deleted = std::cell::Cell::new(false);
+        let done = run(&f.store, &f.cfg, &id, &f.opts(false), &|_| if !deleted.replace(true) { crate::retention::delete_audio(&f.store, &id).unwrap(); }, &AtomicBool::new(false)).unwrap();
+        assert!(!dir.join("mic.wav").exists());
+        assert_eq!(std::fs::read(done.folder.join("audio/mic.wav")).unwrap(), wav(3 * CHUNK + 17, 1));
+    }
+
+    #[test]
+    fn cancel_removes_the_temp_folder_and_the_partial_zip() {
+        let f = Fixture::new("cancel");
+        let id = f.meeting("Longa", true, None);
+        for at in [ExportStep::Copying, ExportStep::Zipping] {
+            let cancel = AtomicBool::new(false);
+            let partial = std::cell::Cell::new(false);
+            let err = run(&f.store, &f.cfg, &id, &f.opts(true), &|p| {
+                if p.step == at {
+                    // something was written before the cancel lands
+                    partial.set(partial.get() || f.listing().iter().any(|n| n.contains("fofoca-export")));
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }, &cancel).unwrap_err();
+            assert!(is_cancelled(&err), "{err}");
+            assert!(partial.get(), "the temp folder existed while exporting");
+            assert!(f.listing().is_empty(), "cancel at {at:?} left {:?}", f.listing());
+        }
     }
 
     #[test]
