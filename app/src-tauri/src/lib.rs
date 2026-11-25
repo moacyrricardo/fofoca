@@ -1,5 +1,6 @@
 //! Tauri shell: exposes fofoca-core to the UI as commands and forwards session events.
 
+mod export;
 mod settings;
 mod tray;
 
@@ -32,6 +33,8 @@ struct AppState {
     upcoming: Mutex<Option<(Instant, Upcoming)>>,
     /// GPU probe and model downloads (spec 015).
     settings: settings::SettingsState,
+    /// The running export and the folders exported (spec 023).
+    export: export::ExportState,
 }
 
 impl AppState {
@@ -60,12 +63,18 @@ struct ConfigView {
     meetings_dir: String,
     whisper_model: String,
     llm_model: String,
+    /// Where the export dialog starts (spec 023), and whether it is the remembered folder.
+    export_dir: String,
+    export_dir_remembered: bool,
     config: Config,
 }
 
 #[tauri::command]
 fn get_config(state: State<AppState>) -> ConfigView {
+    let (export_dir, export_dir_remembered) = state.cfg().export_dir();
     ConfigView {
+        export_dir: export_dir.display().to_string(),
+        export_dir_remembered,
         path: config_path().display().to_string(),
         meetings_dir: state.cfg().meetings_dir().display().to_string(),
         whisper_model: state.cfg().whisper_name(),
@@ -490,6 +499,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             let handle = app.handle().clone();
             let cfg_handle = handle.clone();
@@ -502,7 +512,7 @@ pub fn run() {
             );
             // Replay (spec 014): meeting audio over loopback HTTP, token-guarded, meeting audio only.
             let media = fofoca_core::media::MediaServer::start(store.clone())?;
-            app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), starting: Mutex::new(()), quit_after_save: AtomicBool::new(false), calendars, upcoming: Mutex::new(None), jobs, media, settings: Default::default() });
+            app.manage(AppState { cfg: RwLock::new(cfg.clone()), store: store.clone(), session: Mutex::new(None), starting: Mutex::new(()), quit_after_save: AtomicBool::new(false), calendars, upcoming: Mutex::new(None), jobs, media, settings: Default::default(), export: Default::default() });
             if let Err(error) = tray::setup(app.handle()) {
                 eprintln!("tray unavailable: {error}");
             }
@@ -540,6 +550,11 @@ pub fn run() {
             storage,
             set_audio_policy,
             pick_recording,
+            export::pick_export_folder,
+            export::export_plan,
+            export::export_meeting,
+            export::cancel_export,
+            export::open_export_folder,
             import_recording,
             retranscribe,
             active_session,

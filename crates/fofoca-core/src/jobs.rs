@@ -99,6 +99,11 @@ impl Jobs {
         self.enqueue(Job::Retranscribe { id })
     }
 
+    /// A job for this meeting is queued or running.
+    pub fn is_pending(&self, id: &str) -> bool {
+        self.pending.lock().unwrap().contains(id)
+    }
+
     /// A live recording needs the GPU: jobs stop their model servers until it ends.
     pub fn set_recording(&self, on: bool) {
         self.recording.store(on, Ordering::SeqCst);
@@ -128,11 +133,13 @@ mod tests {
             assert_eq!((&e.meeting_id, e.step.as_str()), (id, "queued"));
         }
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(jobs.is_pending(&first) && jobs.is_pending(&second) && !jobs.is_pending("other"));
         jobs.set_recording(false);
         for id in [&first, &second] {
             let e = rx.recv_timeout(Duration::from_secs(3)).unwrap();
             assert_eq!((&e.meeting_id, e.step.as_str()), (id, "failed"));
             assert!(e.error.unwrap().contains("audio is no longer stored"));
+            assert!(!jobs.is_pending(id), "no longer pending once finished");
         }
         std::fs::remove_dir_all(root).unwrap();
     }
