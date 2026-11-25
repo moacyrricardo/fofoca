@@ -7,6 +7,7 @@ pub mod calendar;
 pub mod capture;
 pub mod config;
 pub mod diarize;
+pub mod export;
 pub mod grounding;
 pub mod hardware;
 pub mod import;
