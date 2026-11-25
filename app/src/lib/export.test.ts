@@ -1,7 +1,7 @@
 // Run with `npm test`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { audioWhat, baseName, defaults, everything, formatBytes, options, partBytes, picked, progressRatio, progressText, total, tree, zipEstimate } from "./export";
+import { audioWhat, baseName, defaults, exportNotice, everything, formatBytes, options, partBytes, picked, progressRatio, progressText, total, tree, zipEstimate } from "./export";
 import type { ExportEvent, ExportParts, ExportPlan, PlannedFile } from "./types";
 
 const files: PlannedFile[] = [
@@ -81,6 +81,18 @@ test("progress text and ratio", () => {
   assert.equal(progressText(e("zipping", "F.zip"), plan), "Making F.zip");
   assert.equal(progressRatio(e("copying", "x", 50, 200)), 0.25);
   assert.equal(progressRatio(e("copying", "x", 0, 0)), 0);
+});
+
+test("a finished export is announced only when no dialog shows it", () => {
+  const e = (state: ExportEvent["state"], extra: Partial<ExportEvent> = {}): ExportEvent =>
+    ({ meeting_id: "m", state, step: null, file: "", done: 0, total: 0, folder: "/home/you/fo-foca/2026-11-20 Sync", zip: null, error: null, ...extra });
+  assert.equal(exportNotice(e("done"), true), null);
+  assert.deepEqual(exportNotice(e("done"), false), { text: "Exported to 2026-11-20 Sync.", error: false });
+  assert.deepEqual(exportNotice(e("done", { zip: "/x.zip" }), false), { text: "Exported to 2026-11-20 Sync (and a .zip).", error: false });
+  assert.deepEqual(exportNotice(e("failed", { error: "disk full" }), false), { text: "Export failed: disk full", error: true });
+  assert.equal(exportNotice(e("failed"), true), null);
+  assert.equal(exportNotice(e("cancelled"), false), null);
+  assert.equal(exportNotice(e("running"), false), null);
 });
 
 test("audio description and folder names", () => {

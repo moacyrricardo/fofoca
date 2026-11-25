@@ -97,6 +97,15 @@ export function audioWhat(files: PlannedFile[], imported: boolean): string {
   return mic && call ? "your mic and the call, as WAV" : mic ? "your mic, as WAV" : "the call, as WAV";
 }
 
+/** The toast for a finished export when no export dialog is open to show it (e.g. the user left
+ *  the meeting page meanwhile); `null` while running, when cancelled, or when the dialog shows it. */
+export function exportNotice(e: ExportEvent, dialogOpen: boolean): { text: string; error: boolean } | null {
+  if (dialogOpen) return null;
+  if (e.state === "done") return { text: `Exported to ${baseName(e.folder ?? "")}${e.zip ? " (and a .zip)" : ""}.`, error: false };
+  if (e.state === "failed") return { text: `Export failed: ${e.error ?? "unknown error"}`, error: true };
+  return null;
+}
+
 /** The last part of a path (the exported folder's name). */
 export function baseName(path: string): string {
   return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? path;

@@ -86,11 +86,10 @@
       else if (e.state === "done") {
         result = { folder: e.folder ?? "", zip: e.zip };
         remembered = true;
-        view = "done";
-        if (!dlg.open) notify(`Exported to ${baseName(result.folder)}.`);
+        view = "done"; // closed meanwhile: App.svelte announces it
       } else {
         view = "form";
-        if (e.state === "failed") notify(`Export failed: ${e.error ?? "unknown error"}`, true);
+        if (e.state === "failed" && dlg.open) notify(`Export failed: ${e.error ?? "unknown error"}`, true);
         else replan().catch(() => {});
       }
     });
@@ -101,7 +100,7 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-<dialog bind:this={dlg} class="dlg" aria-labelledby="export-title" onclick={(e) => { if (e.target === dlg) dlg.close(); }}>
+<dialog bind:this={dlg} class="dlg" data-export aria-labelledby="export-title" onclick={(e) => { if (e.target === dlg) dlg.close(); }}>
   {#if view === "form" && plan && parts}
     <h2 id="export-title">Export meeting</h2>
     <div class="sub">{meeting.meta.title} · {day(meeting.meta.started_at)} · {minutes(meeting.meta.duration_s)}</div>
