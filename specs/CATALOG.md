@@ -23,3 +23,4 @@
 | 020 | done   | postcall-transcript         | moacyrricardo/spec-020-postcall-transcript-build | —     | after the call: mic and call transcribed separately; live kept; re-run button; imports same path |
 | 022 | done   | diarization-fixes           | moacyrricardo/spec-022-diarization-fixes-build | —     | ort optimizer corrupts CAM++ embeddings; segmentation timing drift; small-cluster cleanup, no forced merges, threshold 0.4 |
 | 023 | done   | export-meeting              | moacyrricardo/spec-023-export-meeting-build | —     | mock in 023-assets; folder (+ optional zip) with transcript md/srt, notes, tasks, audio |
+| 024 | todo   | github-pages                | —                                        | —     | mock in 024-assets; docs/ served by Pages; roadmap follows the catalog |
