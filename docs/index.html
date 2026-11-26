@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fo-foca — private meeting notes, on your machine</title>
+<meta name="description" content="Private meeting notes that run entirely on your machine — even on a 2 GB laptop GPU. Records, transcribes, summarizes and pulls out tasks. No bot, no cloud, no account.">
+<link rel="icon" href="assets/favicon.png">
+<!-- Text: docs/index.md (keep both in sync, see AGENTS.md "Public docs"). Look: specs/024-assets/github-pages-mock.html.
+     Tokens and .card/.btn/.chip/.seg/.who/.dot/.spin are copied from app/src/app.css. -->
+<style>
+/* ---- tokens: copied verbatim from app/src/app.css ---- */
+:root {
+  --navy: #172c41; --navy-2: #1c3550; --navy-3: #24425f; --side: #132639; --line: #2d4d6b;
+  --ink: #eaf3f6; --ink-2: #a9c4d0; --ink-3: #7e9cab;
+  --teal: #64bfc4; --coral: #fd8f6e; --peach: #f6a27f;
+  --ok: #7fd69a; --warn: #f3c56b; --bad: #ff7d7d;
+  --font: "Nunito", "Quicksand", ui-rounded, "SF Pro Rounded", "Varela Round", "Segoe UI", system-ui, sans-serif;
+  --mono: ui-monospace, "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--navy); color: var(--ink); font-family: var(--font); font-size: 15px; }
+
+/* ---- shared app classes (from app.css) ---- */
+.muted { color: var(--ink-2); } .faint { color: var(--ink-3); }
+.card { background: var(--navy-2); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+.btn { font-family: inherit; font-weight: 800; font-size: 14px; border-radius: 12px; border: 0; padding: 11px 18px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; text-decoration: none; white-space: nowrap; }
+.btn.rec { background: var(--coral); color: #3b1205; } .btn.rec:hover { background: var(--peach); }
+.btn.teal { background: var(--teal); color: #08262a; } .btn.teal:hover { filter: brightness(1.08); }
+.btn.ghost { background: transparent; color: var(--ink); border: 1.5px solid var(--line); } .btn.ghost:hover { border-color: var(--teal); }
+.btn.sm { padding: 6px 11px; font-size: 12.5px; border-radius: 9px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; border-radius: 20px; padding: 3px 10px; background: var(--navy-3); color: var(--ink-2); border: 1px solid var(--line); white-space: nowrap; }
+.chip.gpu { color: #bfeff2; border-color: #3f8d93; background: #1d4652; }
+.chip.cpu { color: #ffd9cb; border-color: #9b5d49; background: #4a2f2a; }
+.chip.ok { color: #c9f3d6; border-color: #3f8a58; background: #1f4430; }
+.chip.warn { color: #fbe6b8; border-color: #8a6f33; background: #43391f; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.dot.ok { background: var(--ok); } .dot.live { background: var(--coral); animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.spin { width: 16px; height: 16px; border: 2.5px solid var(--line); border-top-color: var(--teal); border-radius: 50%; animation: sp .8s linear infinite; flex: none; }
+@keyframes sp { to { transform: rotate(360deg); } }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; flex: none; }
+.seg button { font-family: inherit; background: none; border: 0; color: var(--ink-2); font-weight: 700; font-size: 12.5px; padding: 6px 12px; cursor: pointer; }
+.seg button.on { background: var(--navy-3); color: var(--ink); }
+.who { font-weight: 800; font-size: 12.5px; } .who.you { color: var(--teal); } .who.call { color: var(--coral); }
+
+/* ================= PRODUCT SURFACE: docs/index.html ================= */
+.page { background: var(--navy); min-height: 100vh; position: relative; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 28px; }
+a { color: var(--teal); }
+
+/* nav */
+.nav { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--navy) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+.nav .wrap { display: flex; align-items: center; gap: 22px; height: 58px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 900; font-size: 18px; color: var(--ink); text-decoration: none; letter-spacing: .2px; }
+.brand img { width: 30px; height: 30px; border-radius: 8px; }
+.nav .links { display: flex; gap: 18px; margin-left: auto; }
+.nav .links a { color: var(--ink-2); text-decoration: none; font-weight: 700; font-size: 14px; }
+.nav .links a:hover { color: var(--ink); }
+.nav .gh { margin-left: 4px; }
+.burger { display: none; margin-left: auto; background: none; border: 1.5px solid var(--line); color: var(--ink); border-radius: 9px; padding: 5px 9px; font-size: 16px; cursor: pointer; }
+
+/* hero */
+.hero { padding: 26px 0 10px; text-align: center; }
+.hero .logo { width: min(620px, 100%); display: block; margin: 0 auto -18px; }
+.hero h1 { font-size: 34px; line-height: 1.2; margin: 0 auto 12px; max-width: 760px; letter-spacing: .2px; }
+.hero h1 em { font-style: normal; color: var(--teal); }
+.hero p.sub { font-size: 17px; color: var(--ink-2); line-height: 1.6; max-width: 640px; margin: 0 auto 8px; }
+.hero .badges { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin: 16px 0 22px; }
+
+/* release card */
+.release { max-width: 640px; margin: 0 auto; text-align: left; position: relative; }
+.release .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.release .ver { font-size: 19px; font-weight: 900; }
+.release .meta { font-size: 13px; color: var(--ink-3); margin-bottom: 14px; }
+.release .dl { display: flex; gap: 10px; flex-wrap: wrap; }
+.release .dl .btn small { font-weight: 700; opacity: .75; font-size: 12px; }
+.release .foot { margin-top: 14px; display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; }
+.release .foot a { text-decoration: none; font-weight: 700; }
+.release .note { margin-top: 12px; font-size: 13px; color: var(--ink-2); background: var(--navy-3); border-radius: 10px; padding: 9px 12px; border-left: 3px solid var(--warn); }
+.release .loading { display: flex; align-items: center; gap: 10px; color: var(--ink-2); padding: 10px 0; }
+
+section { padding: 56px 0 8px; }
+.eyebrow { font-size: 12.5px; color: var(--peach); text-transform: uppercase; letter-spacing: .8px; font-weight: 800; margin: 0 0 6px; }
+section h2 { font-size: 26px; margin: 0 0 8px; }
+section .lead { color: var(--ink-2); line-height: 1.65; max-width: 700px; margin: 0 0 24px; }
+
+/* conversation teaser */
+.teaser { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; margin-top: 34px; text-align: left; }
+.teaser .card h3 { font-size: 13px; margin: 0 0 10px; color: var(--peach); text-transform: uppercase; letter-spacing: .6px; display: flex; gap: 8px; align-items: center; }
+.teaser .line { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px dashed #2d4d6b80; font-size: 14px; line-height: 1.45; }
+.teaser .line:last-child { border-bottom: 0; }
+.teaser .t { font-family: var(--mono); color: var(--ink-3); font-size: 12px; padding-top: 2px; flex: none; }
+.teaser .task { display: flex; gap: 9px; align-items: flex-start; padding: 6px 0; font-size: 14px; }
+.teaser .box { width: 16px; height: 16px; border: 2px solid var(--teal); border-radius: 5px; flex: none; margin-top: 2px; }
+.teaser .box.done { background: var(--teal); }
+
+/* features */
+.features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.feat { display: flex; flex-direction: column; gap: 10px; }
+.feat img { width: 58px; height: 58px; border-radius: 14px; }
+.feat h3 { margin: 0; font-size: 16px; }
+.feat p { margin: 0; color: var(--ink-2); line-height: 1.55; font-size: 14px; }
+
+/* pipeline */
+.pipe { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0 22px; }
+.pipe .node { background: var(--navy-2); border: 1px solid var(--line); border-radius: 12px; padding: 9px 13px; font-weight: 800; font-size: 13.5px; }
+.pipe .node small { display: block; font-weight: 600; color: var(--ink-3); font-size: 11.5px; }
+.pipe .node.hl { border-color: #3f8d93; background: #1d4652; }
+.pipe .node.out { border-color: #9b5d49; background: #4a2f2a; }
+.pipe .arr { color: var(--ink-3); font-weight: 900; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.two h3 { margin: 0 0 8px; font-size: 15px; }
+.two ul { margin: 0; padding-left: 18px; line-height: 1.6; color: var(--ink-2); font-size: 14px; }
+.two li b { color: var(--ink); }
+
+/* numbers */
+.nums { width: 100%; border-collapse: collapse; font-size: 14px; }
+.nums td { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.nums tr:last-child td { border-bottom: 0; }
+.nums td:first-child { color: var(--ink-2); width: 44%; }
+.nums td b { color: var(--ink); }
+.hw { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+
+/* install */
+.steps { counter-reset: s; display: flex; flex-direction: column; gap: 14px; }
+.step { position: relative; padding-left: 58px; }
+.step::before { counter-increment: s; content: counter(s); position: absolute; left: 18px; top: 18px; width: 28px; height: 28px; border-radius: 50%; background: var(--teal); color: #08262a; font-weight: 900; display: grid; place-items: center; font-size: 14px; }
+.step h3 { margin: 0 0 6px; font-size: 16px; }
+.step p { margin: 0 0 10px; color: var(--ink-2); line-height: 1.55; font-size: 14px; }
+.step ul { margin: 8px 0 0; padding-left: 18px; color: var(--ink-2); font-size: 13.5px; line-height: 1.6; }
+.code { position: relative; background: #0f2234; border: 1px solid var(--line); border-radius: 10px; padding: 12px 70px 12px 14px; font-family: var(--mono); font-size: 13px; color: #d7ecf0; overflow-x: auto; white-space: pre; line-height: 1.55; }
+.code .c { color: var(--ink-3); }
+.code .copy { position: absolute; right: 8px; top: 8px; }
+.step .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+code.i { font-family: var(--mono); font-size: 12.5px; background: var(--navy-3); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; color: #d7ecf0; }
+
+/* status */
+.status { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 22px; list-style: none; padding: 0; margin: 0; font-size: 14px; }
+.status li { display: flex; gap: 9px; align-items: flex-start; line-height: 1.45; color: var(--ink-2); padding: 5px 0; }
+.status li .mk { flex: none; width: 18px; height: 18px; border-radius: 6px; display: grid; place-items: center; font-size: 11px; font-weight: 900; margin-top: 1px; }
+.status li.done .mk { background: #1f4430; color: var(--ok); border: 1px solid #3f8a58; }
+.status li.todo .mk { border: 1.5px solid var(--line); }
+.status li.done { color: var(--ink); }
+.status li.expl .mk { border-style: dashed; color: var(--ink-3); }
+.legend { display:flex; gap:16px; flex-wrap:wrap; margin-top:12px; padding-top:10px; border-top:1px solid var(--line); font-size:12.5px; color: var(--ink-3); }
+.feat .chip { margin-left: 6px; vertical-align: 2px; font-size: 11px; padding: 1px 8px; }
+
+footer { margin-top: 64px; border-top: 1px solid var(--line); background: var(--side); padding: 26px 0 34px; font-size: 13.5px; color: var(--ink-3); }
+footer .wrap { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+footer .seal { color: var(--ink-2); flex: 1; min-width: 240px; line-height: 1.5; }
+footer a { color: var(--ink-2); font-weight: 700; text-decoration: none; }
+.toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: #0f2234; border: 1px solid #3f8d93; border-radius: 12px; padding: 9px 14px; font-size: 13px; box-shadow: 0 10px 26px #0008; z-index: 40; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.on { opacity: 1; }
+
+/* ---- responsive ---- */
+@media (max-width: 760px) {
+  .wrap { padding: 0 16px; }
+  .nav .links { display: none; } .nav .gh { display: none; } .burger { display: inline-block; }
+  .nav.open .links { display: flex; flex-direction: column; position: absolute; top: 58px; left: 0; right: 0; background: var(--navy-2); border-bottom: 1px solid var(--line); padding: 12px 16px; gap: 12px; }
+  .hero h1 { font-size: 25px; } .hero p.sub { font-size: 15.5px; }
+  .hero .logo { margin-bottom: -8px; }
+  .teaser, .two, .status { grid-template-columns: 1fr; }
+  .features { grid-template-columns: 1fr; }
+  .feat { flex-direction: row; align-items: flex-start; gap: 14px; } .feat img { width: 48px; height: 48px; }
+  section { padding-top: 42px; } section h2 { font-size: 22px; }
+  .step { padding-left: 18px; padding-top: 50px; } .step::before { top: 14px; }
+  .release .dl .btn { flex: 1 1 100%; justify-content: center; }
+  .nums td:first-child { width: auto; }
+  .nums tr { display: block; border-bottom: 1px solid var(--line); padding: 6px 0; } .nums td { display: block; border: 0; padding: 3px 14px; }
+}
+@media (min-width: 761px) and (max-width: 980px) { .features { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+
+<div class="page" id="top">
+
+  <nav class="nav" id="nav"><div class="wrap">
+    <a class="brand" href="#top"><img src="assets/transcription.png" alt="">fo-foca</a>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#numbers">Numbers</a>
+      <a href="#install">Install</a>
+    </div>
+    <a class="btn ghost sm gh" href="https://github.com/moacyrricardo/fofoca">★ GitHub</a>
+    <button class="burger" onclick="document.getElementById('nav').classList.toggle('open')" aria-label="Menu">☰</button>
+  </div></nav>
+
+  <header class="hero"><div class="wrap">
+    <img class="logo" src="assets/logo.jpg" alt="fo-foca — local ai transcribe &amp; task">
+    <h1>Private meeting notes that run <em>entirely on your machine</em> — even on a 2&nbsp;GB laptop GPU.</h1>
+    <p class="sub">Records your mic and system audio, transcribes it, and turns it into a summary and a task list. No bot joins your call. No cloud. No account.</p>
+    <div class="badges">
+      <span class="chip warn">🚧 Pre-alpha</span>
+      <span class="chip">🐧 Linux x86-64</span>
+      <span class="chip gpu">Vulkan GPU · or CPU</span>
+      <span class="chip ok">pt-BR first · English too</span>
+      <span class="chip">MIT</span>
+    </div>
+
+    <!-- release card: filled from the GitHub releases API; falls back to the Releases page -->
+    <div class="card release" id="release">
+      <div class="loading" id="relLoading"><span class="spin"></span> Looking up the latest build…</div>
+      <noscript><a class="btn rec" href="https://github.com/moacyrricardo/fofoca/releases">Open the Releases page ↗</a></noscript>
+    </div>
+
+    <!-- teaser: what you get out of a meeting (invented lines) -->
+    <div class="teaser">
+      <div class="card">
+        <h3><span class="dot live"></span> Live transcript</h3>
+        <div class="line"><span class="t">00:12</span><div><span class="who you">You</span> &nbsp;Can we ship the import screen by Friday?</div></div>
+        <div class="line"><span class="t">00:16</span><div><span class="who call">Pessoa 1</span> &nbsp;Sim, se o design fechar até quarta.</div></div>
+        <div class="line"><span class="t">00:23</span><div><span class="who call">Pessoa 2</span> &nbsp;I'll send the copy tomorrow morning.</div></div>
+      </div>
+      <div class="card">
+        <h3>✓ Tasks</h3>
+        <div class="task"><span class="box"></span><div>Finish import screen design — <span class="muted">Pessoa 1, Wed</span></div></div>
+        <div class="task"><span class="box"></span><div>Send final copy — <span class="muted">Pessoa 2, tomorrow</span></div></div>
+        <div class="task"><span class="box done"></span><div class="muted">Agree on Friday release</div></div>
+      </div>
+    </div>
+  </div></header>
+
+  <section id="features"><div class="wrap">
+    <p class="eyebrow">What it does</p>
+    <h2>Notes from your calls, without sending them anywhere</h2>
+    <p class="lead">Local meeting-notes apps usually assume a big GPU or an Apple Silicon Mac. fo-foca starts from the other end: it is built around what a small GPU can actually do, from measured numbers, and lets you pick the layout that fits.</p>
+    <div class="features">
+      <div class="card feat"><img src="assets/transcription.png" alt=""><div><h3>Transcription</h3><p>Records your microphone and the system audio (Meet, Zoom, Teams, anything) and transcribes it locally with Whisper, live, while you talk.</p></div></div>
+      <div class="card feat"><img src="assets/summary.png" alt=""><div><h3>Summary</h3><p>A local LLM writes a "summary so far" during the call and a final summary at the end, grounded in the transcript so every claim can be checked.</p></div></div>
+      <div class="card feat"><img src="assets/tasks.png" alt=""><div><h3>To-dos &amp; tasks</h3><p>Action items, decisions, names, numbers and dates pulled out of the meeting.</p></div></div>
+      <div class="card feat"><img src="assets/local-server.png" alt=""><div><h3>100% local</h3><p>Audio, transcripts and notes never leave your computer. Models run as local servers on your GPU or CPU.</p></div></div>
+      <div class="card feat"><img src="assets/settings.png" alt=""><div><h3>Fits your hardware</h3><p>Choose where each model runs (GPU, CPU, or both on a 2 GB GPU taking turns); a GPU memory meter shows what fits. Automatic hardware probing and benchmarking is <span class="chip warn">planned</span></p></div></div>
+      <div class="card feat"><img src="assets/launch.png" alt=""><div><h3>Fast and light</h3><p>A native desktop app (Rust + Tauri), not a browser in a box.</p></div></div>
+    </div>
+  </div></section>
+
+  <section id="how"><div class="wrap">
+    <p class="eyebrow">How it works</p>
+    <h2>Two tracks in, summary and tasks out</h2>
+    <p class="lead">Your mic and the system audio are recorded on separate tracks, so your own lines are labelled from the start. Models run as separate local servers that fo-foca loads, unloads and swaps without restarting.</p>
+    <div class="pipe">
+      <div class="node">🎤 Mic + 🔊 System<small>PipeWire, 2 tracks</small></div><span class="arr">→</span>
+      <div class="node">30 s chunks<small>voice detection</small></div><span class="arr">→</span>
+      <div class="node hl">Whisper<small>whisper.cpp</small></div><span class="arr">→</span>
+      <div class="node">Transcript<small>+ speakers after the call</small></div><span class="arr">→</span>
+      <div class="node hl">LLM<small>llama.cpp</small></div><span class="arr">→</span>
+      <div class="node out">Summary + tasks</div>
+    </div>
+    <div class="two">
+      <div class="card"><h3><span class="dot live"></span>&nbsp; During the call</h3><ul>
+        <li><b>Speech-to-text</b> with whisper.cpp (<code class="i">large-v3-turbo</code>), in 30 s chunks.</li>
+        <li><b>You vs. them</b> from the separate tracks.</li>
+        <li><b>Summary so far</b> with a small open-weight model (Qwen3.5), on demand or every few minutes.</li>
+      </ul></div>
+      <div class="card"><h3><span class="dot ok"></span>&nbsp; After the call</h3><ul>
+        <li><b>Speakers</b>: the system track is split per speaker (<i>Pessoa 1</i>, <i>Pessoa 2</i>…) by a small CPU model, then aligned with the transcript. Rename them; calendar names are suggested.</li>
+        <li><b>Final summary &amp; tasks</b> over the full, speaker-labelled transcript.</li>
+      </ul></div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3 style="margin:0 0 6px;font-size:15px">Small GPU? It swaps.</h3>
+      <p class="muted" style="margin:0;line-height:1.6;font-size:14px">When both models fit in VRAM they stay loaded. When they don't, Whisper stays on the GPU while you talk and the LLM is swapped in for summaries — about 3 seconds. Settings shows the GPU memory each layout needs.</p>
+    </div>
+  </div></section>
+
+  <section id="numbers"><div class="wrap">
+    <p class="eyebrow">Reference numbers</p>
+    <h2>Measured on a 2&nbsp;GB laptop GPU</h2>
+    <div class="hw"><span class="chip">i7-10510U · 4 cores</span><span class="chip gpu">NVIDIA MX230 · 2 GB</span><span class="chip">Vulkan</span></div>
+    <div class="card" style="padding:4px 4px">
+      <table class="nums">
+        <tr><td>Whisper <code class="i">large-v3-turbo</code> q5_0 on GPU</td><td><b>824 MiB</b> VRAM · ~0.36× real time on a whole file · ~0.59× per 30 s chunk</td></tr>
+        <tr><td>pt-BR word error rate</td><td><b>~2 %</b> <span class="muted">(vs ~12 % for Whisper small)</span></td></tr>
+        <tr><td>Qwen3.5-2B Q4_K_M on GPU</td><td><b>1.4–1.6 GB</b> VRAM (8K–32K context) · ~17 tokens/s</td></tr>
+        <tr><td>Swap Whisper ⇄ LLM</td><td><b>~3 s</b></td></tr>
+        <tr><td>Both models on the GPU at once</td><td><span style="color:var(--bad);font-weight:800">✗</span> doesn't fit in 2 GB → swap layout</td></tr>
+      </table>
+    </div>
+  </div></section>
+
+  <section id="install"><div class="wrap">
+    <p class="eyebrow">Install</p>
+    <h2>Install on Linux</h2>
+    <p class="lead">Linux x86-64, test builds. Takes a few minutes plus the model download (~1.9 GB).</p>
+    <div class="steps">
+      <div class="card step">
+        <h3>Install the system pieces</h3>
+        <p>Debian / Ubuntu package names. With an NVIDIA GPU, use the NVIDIA driver, which includes Vulkan.</p>
+        <div class="code"><button class="btn ghost sm copy">Copy</button>sudo apt install pipewire-bin mesa-vulkan-drivers libwebkit2gtk-4.1-0</div>
+      </div>
+      <div class="card step">
+        <h3>Download the models and engines</h3>
+        <p>Get <code class="i">fofoca-setup.sh</code> from the release above. Everything goes to <code class="i">~/.local/share/fofoca/</code>, where the default config looks.</p>
+        <div class="row">
+          <div class="seg" id="setupSeg">
+            <button class="on" data-v="default">Default · ~1.9 GB</button><button data-v="small">Small · ~1.3 GB</button><button data-v="models">Models only</button>
+          </div>
+        </div>
+        <div class="code" id="setupCode"></div>
+        <ul>
+          <li><code class="i">llama-server</code> (llama.cpp, Vulkan) is downloaded.</li>
+          <li><code class="i">whisper-server</code> is built from source (whisper.cpp ships no Linux build), which needs <code class="i">sudo apt install git cmake build-essential glslc libvulkan-dev</code>.</li>
+        </ul>
+      </div>
+      <div class="card step">
+        <h3>Run fo-foca</h3>
+        <div class="row"><div class="seg" id="pkgSeg"><button class="on" data-v="appimage">AppImage</button><button data-v="deb">.deb</button></div></div>
+        <div class="code" id="pkgCode"></div>
+      </div>
+      <div class="card step">
+        <h3>Check the models</h3>
+        <p style="margin:0">In <b style="color:var(--ink)">Settings → Models</b>, check that every row is <span class="chip ok" style="font-size:11px;padding:1px 8px">green</span>, and pick the GPU for each engine.</p>
+      </div>
+    </div>
+  </div></section>
+
+  <section id="status"><div class="wrap">
+    <p class="eyebrow">Status</p>
+    <h2>Where it is</h2>
+    <p class="lead">Linux first (PipeWire); Windows and macOS are planned. Any GPU that works with Vulkan should be usable — NVIDIA, AMD or Intel — or CPU only. Hardware reports and pt-BR test recordings are very welcome.</p>
+    <div class="card">
+      <ul class="status">
+        <li class="done"><span class="mk">✓</span>Live transcript — mic and call on separate tracks, voice detection, adaptive chunks</li>
+        <li class="done"><span class="mk">✓</span>Summary so far, and a final summary and tasks checked against the transcript</li>
+        <li class="done"><span class="mk">✓</span>Speaker separation after the call, with names suggested from the invite</li>
+        <li class="done"><span class="mk">✓</span>After the call, mic and call transcribed separately, re-run on demand</li>
+        <li class="done"><span class="mk">✓</span>Calendar via a private iCal link</li>
+        <li class="done"><span class="mk">✓</span>Meeting labels, set automatically from the calendar</li>
+        <li class="done"><span class="mk">✓</span>Pause and resume a recording</li>
+        <li class="done"><span class="mk">✓</span>Import a recording made elsewhere</li>
+        <li class="done"><span class="mk">✓</span>Replay a meeting with its audio</li>
+        <li class="done"><span class="mk">✓</span>Settings: where each model runs (GPU / CPU / swap), model downloads</li>
+        <li class="done"><span class="mk">✓</span>Tasks across meetings, filtered by label</li>
+        <li class="done"><span class="mk">✓</span>Tray icon: start, stop, show / hide</li>
+        <li class="done"><span class="mk">✓</span>Export a meeting: transcript, notes, tasks, audio</li>
+        <li class="todo"><span class="mk"></span>Live transcript per track during the call</li>
+        <li class="todo"><span class="mk"></span>Auto setup: hardware probe, layout planner, first-run benchmark</li>
+        <li class="todo"><span class="mk"></span>Engines bundled in the package; then Windows and macOS</li>
+        <li class="todo expl"><span class="mk">?</span>Local MCP server so assistants can read your meetings</li>
+      </ul>
+      <div class="legend"><span>✓ shipped</span><span>☐ planned</span><span>? exploring</span><span style="margin-left:auto">from <a href="https://github.com/moacyrricardo/fofoca/blob/main/specs/CATALOG.md">specs/CATALOG.md</a></span></div>
+    </div>
+  </div></section>
+
+  <footer><div class="wrap">
+    <div class="seal"><b style="color:var(--ink)">fofoca</b> is Brazilian Portuguese for <i>gossip</i> — and <b style="color:var(--ink)">foca</b> means <i>seal</i>. A seal that listens to your meetings and tells you what was said. 🦭</div>
+    <a href="https://github.com/moacyrricardo/fofoca">GitHub</a>
+    <a href="https://github.com/moacyrricardo/fofoca/blob/main/specs/CATALOG.md">Design decisions</a>
+    <a href="https://github.com/moacyrricardo/fofoca/issues">Report an issue</a>
+    <a href="https://github.com/moacyrricardo/fofoca/blob/main/LICENSE">MIT license</a>
+  </div></footer>
+
+  <div class="toast" id="toast"></div>
+
+</div>
+
+<script>
+var REPO = 'moacyrricardo/fofoca';
+
+// ---- toast + copy ----
+var toastT;
+function toast(msg) { var t = document.getElementById('toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(function(){ t.classList.remove('on'); }, 1400); }
+document.addEventListener('click', function(e) {
+  var b = e.target.closest('.copy'); if (!b) return;
+  var box = b.parentNode.cloneNode(true); box.removeChild(box.querySelector('.copy'));
+  var text = box.textContent.split('\n').filter(function(l){ return l.trim() && l.trim().charAt(0) !== '#'; }).join('\n');
+  (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(
+    function(){ toast('Copied to clipboard'); }, function(){ toast('Select the text to copy it'); });
+});
+
+// ---- install switches ----
+var setupCmds = {
+  default: '<span class="c"># default models (~1.9 GB) + engines</span>\nchmod +x fofoca-setup.sh\n./fofoca-setup.sh',
+  small:   '<span class="c"># smaller models (~1.3 GB) + engines</span>\nchmod +x fofoca-setup.sh\n./fofoca-setup.sh --small',
+  models:  '<span class="c"># you already have whisper-server and llama-server</span>\nchmod +x fofoca-setup.sh\n./fofoca-setup.sh --models-only'
+};
+var pkgCmds = {
+  appimage: 'chmod +x fo-foca_*.AppImage\n./fo-foca_*.AppImage',
+  deb: 'sudo apt install ./fo-foca_*_amd64.deb'
+};
+function seg(id, codeId, map) {
+  var el = document.getElementById(id), code = document.getElementById(codeId);
+  function set(v) {
+    el.querySelectorAll('button').forEach(function(b){ b.classList.toggle('on', b.dataset.v === v); });
+    code.innerHTML = '<button class="btn ghost sm copy">Copy</button>' + map[v];
+  }
+  el.addEventListener('click', function(e){ if (e.target.dataset.v) set(e.target.dataset.v); });
+  set(el.querySelector('.on').dataset.v);
+}
+seg('setupSeg', 'setupCode', setupCmds);
+seg('pkgSeg', 'pkgCode', pkgCmds);
+document.querySelectorAll('.nav .links a').forEach(function(a){ a.addEventListener('click', function(){ document.getElementById('nav').classList.remove('open'); }); });
+
+// ---- release card: newest non-draft release, flagged pre-releases included (/releases/latest skips them);
+// asset names carry the version, so the buttons come from the API. A tag suffix (v0.1.0-pr32) also marks a test build.
+function esc(s) { return String(s).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function mb(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+function fallback() {
+  document.getElementById('release').innerHTML =
+    '<div class="head"><span class="ver">Download fo-foca for Linux</span></div>' +
+    '<div class="meta">Builds (AppImage, .deb and the setup script) are attached to each GitHub release.</div>' +
+    '<div class="dl"><a class="btn rec" href="https://github.com/' + REPO + '/releases">Open the Releases page ↗</a>' +
+    '<a class="btn ghost" href="#install">Install guide ↓</a></div>';
+}
+function render(r) {
+  var find = function(end){ return r.assets.filter(function(a){ return a.name.slice(-end.length) === end; })[0]; };
+  var btns = [['.AppImage', 'AppImage', 'rec'], ['.deb', '.deb', 'teal'], ['fofoca-setup.sh', 'fofoca-setup.sh', 'ghost']]
+    .map(function(x){ var a = find(x[0]); return a ? '<a class="btn ' + x[2] + '" href="' + esc(a.browser_download_url) + '">↓ ' + x[1] + ' <small>' + mb(a.size) + '</small></a>' : ''; }).join('');
+  if (!btns) return fallback();
+  var test = r.prerelease || /^v?\d+(\.\d+)*-/.test(r.tag_name);
+  var date = new Date(r.published_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  var title = (r.name || r.tag_name).replace(/\s*\(.*\)\s*$/, '');
+  var sub = (r.name || '').match(/\((?:pre-release:\s*)?(.*)\)/);
+  document.getElementById('release').innerHTML =
+    '<div class="head"><span class="ver">' + esc(title) + '</span>' +
+    (test ? '<span class="chip warn">test build</span>' : '<span class="chip ok">latest</span>') + '</div>' +
+    '<div class="meta">Released ' + esc(date) + (sub ? ' · ' + esc(sub[1]) : '') + '</div>' +
+    '<div class="dl">' + btns + '</div>' +
+    (test ? '<div class="note">Test build — no stable release yet. Models and engines are not bundled: run <code class="i">fofoca-setup.sh</code> first (<a href="#install">step 2</a>).</div>' : '') +
+    '<div class="foot"><a href="#install">Install guide ↓</a><a href="' + esc(r.html_url) + '">Release notes ↗</a><a href="https://github.com/' + REPO + '/releases">All releases ↗</a></div>';
+}
+fetch('https://api.github.com/repos/' + REPO + '/releases?per_page=10', { headers: { Accept: 'application/vnd.github+json' } })
+  .then(function(res){ if (!res.ok) throw new Error(res.status); return res.json(); })
+  .then(function(list){ var r = list.filter(function(x){ return !x.draft; })[0]; r ? render(r) : fallback(); })
+  .catch(fallback);
+</script>
+</body>
+</html>
