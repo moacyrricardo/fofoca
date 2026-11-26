@@ -138,4 +138,5 @@ to your meetings and tells you what was said. 🦭
 [GitHub](https://github.com/moacyrricardo/fofoca) ·
 [Design decisions](https://github.com/moacyrricardo/fofoca/blob/main/specs/CATALOG.md) ·
 [Report an issue](https://github.com/moacyrricardo/fofoca/issues) ·
-[MIT license](https://github.com/moacyrricardo/fofoca/blob/main/LICENSE)
+[MIT license](https://github.com/moacyrricardo/fofoca/blob/main/LICENSE) ·
+[Made by Iskeru](https://iskeru.com)
