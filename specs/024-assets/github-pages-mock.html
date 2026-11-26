@@ -202,7 +202,7 @@ footer a { color: var(--ink-2); font-weight: 700; text-decoration: none; }
 <div class="shell-bar">
   <b>mock · docs/index.html</b>
   <div class="grp">Width <button data-w="full" class="on">Desktop</button><button data-w="phone">Phone</button></div>
-  <div class="grp">Release API <button data-r="loading">loading</button><button data-r="pre" class="on">only pre-release</button><button data-r="stable">stable release</button><button data-r="down">API down</button></div>
+  <div class="grp">Release API <button data-r="loading">loading</button><button data-r="pre" class="on">test build (today)</button><button data-r="stable">stable release</button><button data-r="down">API down</button></div>
   <span class="sp"></span>
   <button id="annBtn">ⓘ annotations</button>
 </div>
@@ -435,7 +435,7 @@ footer a { color: var(--ink-2); font-weight: 700; text-decoration: none; }
   <h4>Pinned items</h4>
   <ul>
     <li><b>1 · Logo as hero</b>: the logo image is the headline art; its navy background matches <code>--navy</code> closely, but not exactly.</li>
-    <li><b>2 · Release card (invented)</b>: the real page calls <code>GET api.github.com/repos/moacyrricardo/fofoca/releases?per_page=10</code> and takes the newest one, <i>including pre-releases</i>, since <code>/releases/latest</code> skips them. Buttons come from the release's assets, matched by suffix (<code>.AppImage</code>, <code>.deb</code>, <code>setup.sh</code>), because the file names carry the version. If the API is unreachable or rate-limited (60/h per IP), it falls back to a link to <code>/releases</code>. Use the shell's "Release API" buttons to see each state. The pre-release sizes and date are real; the 0.2.0 stable release is invented.</li>
+    <li><b>2 · Release card (invented)</b>: the real page calls <code>GET api.github.com/repos/moacyrricardo/fofoca/releases?per_page=10</code> and takes the newest non-draft one, including flagged pre-releases (which <code>/releases/latest</code> skips). It's a <i>test build</i> when flagged or when its tag has a suffix (<code>v0.1.0-pr32</code>): today's release is only named a pre-release, not flagged. Buttons come from the release's assets, matched by suffix (<code>.AppImage</code>, <code>.deb</code>, <code>setup.sh</code>), because the file names carry the version. If the API is unreachable or rate-limited (60/h per IP), it falls back to a link to <code>/releases</code>. Use the shell's "Release API" buttons to see each state. The pre-release sizes and date are real; the 0.2.0 stable release is invented.</li>
     <li><b>3 · Transcript + tasks teaser (invented)</b>: drawn with the app's <code>.who</code>/<code>.dot</code> styles, all invented lines. It stands in for a real screenshot; the build could swap in a screenshot of the fake backend (<code>npx vite preview</code>), never real meeting data.</li>
     <li><b>4 · Pipeline</b>: replaces the README's mermaid chart with plain HTML nodes, so the page needs no JS library.</li>
     <li><b>5 · Setup-script switcher (invented)</b>: the README's three command lines, behind the app's <code>.seg</code> control.</li>

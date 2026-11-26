@@ -20,8 +20,9 @@ auto setup (002, still `todo`) as a current feature.
 
 Two facts about the releases shape the download button:
 
-- GitHub's `/releases/latest` **skips pre-releases**. Today the only release, `v0.1.0-pr32`, is a
-  pre-release, so a link to `/releases/latest` returns a 404.
+- GitHub's `/releases/latest` **skips releases flagged as pre-release**. Today's only release,
+  `v0.1.0-pr32`, is *named* a pre-release but isn't flagged, so `/releases/latest` resolves to it.
+  Test builds are marked by their tag (a `-suffix` after the version) more reliably than by the flag.
 - Asset names carry the version (`fo-foca_0.1.0_amd64.AppImage`), so
   `/releases/latest/download/<name>` breaks at every version bump.
 
@@ -37,9 +38,12 @@ Two facts about the releases shape the download button:
      only for a redesign, so diffs stay small and the look stays stable.
 3. **The release card reads the GitHub API in the browser.**
    - `GET https://api.github.com/repos/moacyrricardo/fofoca/releases?per_page=10`, then take the
-     first release that isn't a draft. This includes pre-releases.
+     first release that isn't a draft. This includes flagged pre-releases, which `/releases/latest`
+     would skip.
    - Pick the buttons by file ending: `.AppImage`, `.deb`, `fofoca-setup.sh`. Show each file's size.
-   - Show a "test build" chip and a note for a pre-release, and a "latest" chip for a full release.
+   - A release is a **test build** when it's flagged as a pre-release **or** its tag has a suffix
+     after the version (`v0.1.0-pr32`). It gets a "test build" chip and a note. Otherwise it gets
+     a "latest" chip.
    - **Fallback:** if the request fails (offline, the 60/hour per-IP limit, no JS), show a link to
      `/releases`. A `<noscript>` holds the same link.
 4. **Sections, top to bottom** (as in the mock): nav · hero (logo, tagline, badges, release card,
