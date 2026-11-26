@@ -1,4 +1,4 @@
-Status: doing
+Status: done
 Branch: moacyrricardo/spec-024-github-pages-build
 
 # 024 — GitHub Pages: a landing page with the latest build and install steps
@@ -97,3 +97,30 @@ Two facts about the releases shape the download button:
   backend (`npx vite preview`) can replace it later. It must never come from a real meeting.
 - **Linux only.** There is no OS detection, because there is only one platform.
 - **The page itself is English only**, although the app is pt-BR first.
+
+## Implementation Notes
+
+- Built as specified, with these differences:
+  - **Test builds are recognised by the tag too.** While building, the API showed that
+    `v0.1.0-pr32` is only *named* a pre-release, not flagged as one, so `/releases/latest` does
+    resolve today. The spec's Context was corrected on the spec branch. The page treats a flagged
+    pre-release **or** a tag with a suffix after the version as a test build.
+  - **The page's wording avoids claiming auto setup.** The mock's "Detect → Plan → Verify → Fall
+    back" line in "How it works" was replaced by what 015 ships (a GPU memory meter per layout).
+    The "measures your hardware" line in the pitch was reworded the same way.
+  - The README keeps one extra roadmap row that the page doesn't have: feasibility research (001).
+  - `docs/index.md` puts the AppImage and .deb commands in one code block. The page shows them
+    behind a switch.
+- **Verified:**
+  - The release-card code was run under Node against the real API response for this repo. It
+    gives "fo-foca 0.1.0-pr32", a "test build" chip, the AppImage (97.8 MB), .deb (18.1 MB) and
+    setup-script (4 KB) download links, and the release-notes link. The fallback card also
+    renders.
+  - The page's script parses (`node --check`).
+  - The checks in AGENTS.md pass. This change touches no code.
+- **Not verified yet:**
+  - **The page hasn't been looked at in a browser.** No screenshots: headless Chromium (snap)
+    couldn't write to the scratchpad, and geckodriver isn't installed. That covers the layout at
+    phone width, the ☰ menu, the copy buttons (`navigator.clipboard`) and the live API call from
+    the `github.io` origin.
+  - **Pages isn't switched on.** That happens after merge, by the repo owner (see Implementation).
