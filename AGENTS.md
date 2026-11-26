@@ -54,6 +54,24 @@ Tests that need real models or real audio are `#[ignore]` and take their inputs 
 - Measure before claiming: numbers in specs come from the real binaries on the reference laptop;
   anything only checked in the browser preview is said so.
 
+## Public docs
+
+`docs/` is the project site, served by GitHub Pages from `main` (spec 024):
+`docs/index.md` is its text, `docs/index.html` lays it out in the design system below, and
+`docs/assets/` holds copies of the logo and icons (`assets/` is the source).
+
+- **The roadmap follows `specs/CATALOG.md`.** A spec's close-out commit updates, in the same commit:
+  - README "Status & roadmap" (`done` checked, `todo` open, concern *exploring*),
+  - the Status list in `docs/index.md` and `docs/index.html`,
+  - any feature text that claimed the spec as planned.
+- **Install steps and release assets change together.** A change to `scripts/fofoca-setup.sh`
+  flags, system packages, or release file names updates README "Install" and the Install
+  section of both `docs/` files.
+- **Edit `docs/index.html` in place**, next to the same edit in `docs/index.md`. Regenerate it from
+  the `.md` (with `/rich-html`) only for a redesign, and start that from a new mock.
+- The release card reads the GitHub releases API in the browser. Nothing in `docs/` needs editing
+  when a release is published.
+
 ## Reference hardware
 
 Tuned for a 4-core laptop with a **2 GB NVIDIA MX230**: Whisper large-v3-turbo and the notes LLM
