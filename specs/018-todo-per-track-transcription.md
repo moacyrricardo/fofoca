@@ -1,179 +1,138 @@
-Status: todo
-Branch: —
+# 018 — Per-track transcription during the call
 
-# 018 — Transcribe the mic and call tracks separately
+> **Reworked 2026-11-25.** The first version of this spec covered live **and** after-call
+> per-track transcription. The after-call part shipped as **020** (`transcript_after`,
+> `pipeline/tracks.rs`), so this spec now covers **live only**. The first build (PR #23, not merged,
+> branch `moacyrricardo/spec-018-per-track-transcription`) and the slice-queue build that followed
+> (019, PR #25) were dropped. What they measured is kept below as context, and decides how this
+> spec should be built. **How live audio is cut and scheduled is spec 019.** This spec decides
+> *what* live produces; 019 decides *how*.
 
 ## Context
 
-fo-foca records two tracks per meeting, `mic.wav` (you) and `system.wav` (the call), but it
-**transcribes them mixed**. `Session::transcribe_chunk` (`session.rs`) sends `audio::mix(mic, sys)`
-to Whisper. Each returned segment is then labelled You or Call by `audio::attribute`: the louder
-track over the segment's time range wins, and the mic has to be ≥ 1.2× the call.
+**Live is still mixed.** During a call, `Session::transcribe_chunk` (`session.rs`) sends
+`audio::mix(mic, sys)` to Whisper. Each returned segment is then labelled You or Call by
+`audio::attribute`: the louder track over the segment's time range wins, with the mic needing
+≥ 1.2× the call. Whisper cuts at sentences, not at speaker changes, so a line often holds both
+people, and the longer or louder speaker takes it. On a real 2-person, 10:38 pt-BR call the live
+transcript had **19 You / 78 Call** lines while the two took turns, although the audio is clean (the
+mic is 30–800× louder than the call when the user speaks).
 
-Whisper cuts segments at sentences, not at speaker changes, so one segment often holds both people.
-The longer and louder speaker then takes the whole line. Measured on a real 2-person, 10:38 pt-BR
-call (2026-11-20; the numbers come from per-second loudness of the two WAVs, and no audio was
-copied):
+**After the call this is already fixed (020).** The saved transcript is rebuilt from each track
+separately: speech spans per track (`audio/speech.rs`: `speech_spans`), packed into windows of up
+to 30 s (`pack`), transcribed per track (`pipeline/tracks.rs`: `transcribe_track`), and merged by
+start (`merge_tracks`). On the same call that took **376.9 s (0.59× the call)** on the MX230 and
+gave **67 You / 94 Call** lines. The live transcript is kept as `transcript.live.jsonl` and isn't
+shown.
 
-- **78 lines were labelled Call and 19 You**, although the two people were taking turns.
-- 00:00 "E aí Vini, tudo bem?" has the call at 0–2 s and you at 2–3 s, and was labelled Call.
-- 00:29 "Sim, você tinha falado mesmo. Cara, eu tinha esquecido." has you at 29–30 s and the call
-  at 31–32 s. The mic was 0.84× the call (it needed 1.2×), so the line was labelled Call.
-- The audio itself is clean. In the seconds where you speak, the mic is 30–800× louder than the
-  call, and your voice is not in `system.wav`. **The channels are already separate. The
-  transcription throws that away.**
+So what's left wrong is **what the user sees while the call is on**: the Record screen's lines, the
+live summary (015 Balanced, every 5 min) and anything read live. All of it carries the mixed
+labels.
 
-Two related defects show up on the same call:
+### What the dropped builds measured (real 10:38 call read in place, MX230, large-v3-turbo + VAD, simulated real time)
 
-- **Speaker over-count.** Speaker separation (003) runs on the call track only, yet it found 3
-  "Persons" on a call with one remote voice (s1: 56 lines, s3: 21, s2: 1).
-  `max_speakers = (attendees + 1).max(4)` (`pipeline.rs`) allowed 4 for a 2-attendee invite.
-- **Track length mismatch.** `mic.wav` is 636.0 s and `system.wav` is 638.2 s. Either one capture
-  started later or one dropped samples; it isn't known which. Lines merged from two tracks can only
-  be ordered correctly if the tracks share one timeline.
+| Live variant | Requests | Whisper busy | Median delay | Worst | Text done after audio | You / Call |
+|---|---|---|---|---|---|---|
+| Mixed (today) | 45–56 | **0.86–0.93×** | 10.8–22 s | 63–86 s | 9–13 s | 19 / 78 (guessed) |
+| Per track, both tracks cut at the same points (#23) | 73–80 | 1.03–1.20× | 31–33 s | 84–147 s | 31–142 s | 31 / 42 |
+| Per track, each track cut at its own pauses, one queue (019, #25) | 79–81 | 1.02–1.06× | 15–17.5 s | 44–52 s | 30–44 s | 32–37 / 47–59 |
+
+Findings that shape this spec:
+- **Cost tracks requests, not seconds.** A Whisper request costs about 8–10.5 s on the MX230, of
+  which about 4.7 s is fixed. Per-track live sends about 1.4× the requests of mixed, because
+  people take turns about 4.5 times a minute and a short "uhum" still costs a request.
+- **Shared cuts grow the backlog without bound**: 1.2×, and the text finished 2+ minutes after the
+  call ended. **Own cuts per track plus a single queue bound the backlog** (10–33 s, emptying at the
+  end), with a median delay of about 17 s, but **stay just above 1.0×**.
+- **Joining both tracks in one request with a 1 s silence gap doesn't work.** Whisper's VAD removes
+  the gap, so the split point is lost.
+- **VAD glues one speaker's separate turns into one line.** Each track is silent while the other
+  person talks, VAD drops that silence, and Whisper writes several turns as one line. Cutting each
+  track at its own pauses (019) and 020's packing reduce it, but don't remove it.
+- **Echo** (synthetic call at −20 dB in the mic): a text rule dropped all 6 echoes, but also dropped
+  a real turn glued to one. The level-based "hold back likely echo" in 019 fired 14–21 times on a
+  headphone call with no echo at all.
+- **Track timing:** a constant 85 ms start lag between the captures, with no drift over 5 minutes.
+  One call had an unexplained 2.2 s length difference. That's spec 021.
 
 ## Decision
 
-1. **Each track is transcribed on its own, live and after the call.** A line's track (`you` /
-   `call`) comes from the file it was transcribed from, so there's no loudness guess. The mixed
-   transcription and `audio::attribute` are **removed**, not kept as a setting. Imports have a
-   single track and stay `call`, as today.
-2. **Live:** for every chunk, send each track that has speech to Whisper separately. Merge the two
-   result lists by start time before emitting `Segment` events. A track with no speech in the
-   chunk costs nothing.
-3. **After the call: rebuild the transcript per track.** This is a new after-call step,
-   `transcript_after`, on by default and toggled in Settings → Processing next to the 015 steps. It
-   re-transcribes each whole track with the GPU free and no chunk boundaries, then merges both by
-   time and replaces the live transcript. The live transcript is kept as `transcript.live.jsonl`,
-   which already exists for this. Speakers and notes then run on the rebuilt transcript.
-   Record-only mode (015) already transcribes after the call; it becomes per-track by the same code.
-4. **Speaker cap from the invite:** when the meeting has ≥ 2 calendar attendees, speaker separation
-   on the call track gets `max_speakers = attendees − 1`, assuming the user is one of them. With 0–1
-   attendees it stays as today.
-5. **One timeline:** record when each capture's first sample arrived, and pad the later track's
-   start with silence so both start at t = 0 together. Measure first which cause explains the
-   2.2 s gap (see Implementation §5).
-6. **No echo transcribed twice:** without headphones the mic hears the call. A mic line that repeats
-   an overlapping call line is dropped (Implementation §3).
+1. **Live lines get their track from the file they were spoken on.** During a call, each track's
+   speech is transcribed on its own. `audio::attribute` and the mixed request are removed from the
+   live path. Imports are not live and are unaffected (020 already sends them through the per-track
+   path).
+2. **Reuse 020's per-track building blocks; don't duplicate them.** Speech detection
+   (`audio::speech::speech_spans`), the mapping from window time back to recording time (`Window`,
+   `Piece`, `map_segment`) and `merge_tracks` are shared by live and after-call. Where live needs a
+   streaming variant (spans that grow as audio arrives), it extends `audio/speech.rs` rather than
+   adding a second detector.
+3. **Cutting and scheduling are spec 019.** Each track is cut at its own pauses, and one Whisper
+   worker takes the earliest ready slice. 018 and 019 are built together. 018 without 019 is the
+   shared-cut variant, which measured 1.2× with an unbounded backlog, and is **not to be built**.
+4. **Live summary and live view** read lines in start order. Lines can arrive out of order, so the
+   view inserts by start rather than appending.
+5. **After the call nothing changes.** 020's step still rebuilds the saved transcript from the whole
+   tracks. Live per-track only improves what's shown during the call and in `transcript.live.jsonl`.
+   With live already per-track, whether 020's rebuild stays on by default is revisited when this
+   ships, not here.
+6. **Acceptance: the live cost must fit on the MX230.** On the 10:38 call (read in place, counts
+   only), at the Balanced profile with the automatic summary running, **Whisper busy ≤ 1.0×** and a
+   **bounded backlog**: the backlog may rise but returns below 30 s at least once every 5 minutes,
+   and the text is done ≤ 30 s after the audio ends. The median delay must not be worse than mixed
+   by more than 10 s. Labels: at least as many You lines as mixed (19) and no Call line spanning a
+   You turn of ≥ 2 s. **If 019's design can't meet ≤ 1.0×, this spec isn't shipped.** It goes back
+   to a decision instead of landing a live path that falls behind.
+7. **Out of scope:** echo removal (020's Known Gaps apply live too, and echo work gets its own spec),
+   track alignment (021), and speaker separation live (003 stays after-call only).
 
 ## Implementation
 
-### 1. Speech per track (core, `audio.rs`)
+### 1. Live path (`session.rs`)
 
-- New `fn has_speech(track: &[i16]) -> bool` with the same relative threshold `pause_cut` already
-  uses: noise floor = 10th percentile of 50 ms window levels, and quiet = `(floor × 2).max(0.006)`.
-  It returns true when ≥ 300 ms in total of 50 ms windows lie above that threshold.
-  - An absolute level doesn't work: mic noise (0.003–0.015 RMS) overlaps quiet speech, as `pause_cut`'s
-    comment notes.
-  - Whisper's Silero VAD (`--vad`) still runs on the server. This check only avoids sending silent
-    tracks at all.
-- Unit tests: tone vs silence vs noise-only buffers; a buffer of noise with 200 ms of speech returns
-  false, and one with 400 ms returns true.
+- Replace the mixed `transcribe_chunk` with 019's per-track slices and queue. Each returned segment
+  keeps the slice's track; times are mapped back with the same `Window` logic 020 uses.
+- `transcript.live.jsonl` is appended in arrival order (crash-safe). Every reader sorts by start
+  (020's readers already do for the saved transcript; extend to the live file).
+- Remove `audio::attribute` and its test, and `audio::mix` if nothing else uses it.
 
-### 2. Live chunks (core, `session.rs`)
+### 2. Shared code with 020 (`audio/speech.rs`, `pipeline/tracks.rs`)
 
-- `transcribe_chunk(mic, sys)` becomes:
-  ```text
-  for (track, samples) in [(You, mic), (Call, sys)] where has_speech(samples):
-      raw = whisper.transcribe(wav(samples), language, prompt)
-      segments += raw mapped to Segment { track, start/end/words offset by chunk start }
-  sort segments by start; drop echoes (§3); append + emit in that order
-  ```
-- The existing near-silence skip (`rms(mic).max(rms(sys)) < 0.003`) is replaced by `has_speech`
-  per track.
-- **Prompt:** both calls get the same prompt as today: the last 200 characters of the merged
-  transcript. Whisper uses the prompt for vocabulary and continuity. Using each track's own history
-  instead is an option to measure, not a requirement.
-- Order on the GPU: mic first, then call. Both run in the same Whisper slot as today, with no
-  parallel requests. 015's layouts and swap logic don't change: it is still one "transcribe" phase
-  per chunk.
-- **Cost (measured on the 10:38 call, 12 s chunks):** 37 of 53 chunks have speech on both tracks,
-  16 on the call only and 0 on the mic only. That's about **1.7× the Whisper requests** of today.
-  Whisper's encoder cost is per request, not per second of speech, so expect live Whisper time to
-  rise by about that much. The build must measure, on the MX230 Balanced layout, the text delay
-  before and after (010 measured 12.7 s) and whether the backlog stays bounded. If it doesn't, see
-  Known Gaps.
-- `audio::mix` stays if anything else uses it. `audio::attribute` and its test are deleted.
+- Move what both need (span detection, window mapping, `merge_tracks`) into a module both paths
+  import. Don't copy it into `session.rs`.
+- A streaming span detector (rolling noise floor, as 019 specifies) lives next to `speech_spans`,
+  with tests showing both agree on the same complete buffer.
 
-### 3. Echo (no headphones)
+### 3. UI (`app/src/lib/live.svelte.ts`, Record screen)
 
-- When the mic picks up the speakers, the mic track contains a quieter copy of the call, and Whisper
-  will transcribe it as You.
-- Rule: drop a mic segment when a call segment overlaps it in time by ≥ 50 % of the mic segment's
-  length **and** ≥ 60 % of the mic segment's normalised words (lower-cased, accents and punctuation
-  stripped) appear in that call segment.
-- Applied in the live merge and in the after-call rebuild. The dropped count goes to the log, not
-  the UI.
-- Unit tests cover: an exact echo, a partial echo, a real overlapping reply (different words, kept),
-  and "sim" vs "sim" in non-overlapping time (kept).
+- Insert incoming lines at their start position (a pure helper in `app/src/lib/` with a test).
+  Keep auto-scroll pinned to the bottom unless the user scrolled up.
+- `fake.ts`: the fake live session emits one out-of-order pair, so the browser preview shows it.
 
-### 4. After-call rebuild (core, `pipeline.rs` + `config.rs` + Settings)
+### 4. Measurement
 
-- `config.rs` `[workflow]`: new `transcript_after: bool`, default `true`, saved with `toml_edit` as
-  the other workflow keys are (015). Settings → Processing tab: an "After the call" toggle
-  "Re-transcribe each track", placed above "Separate speakers". It uses the same pure helper style
-  as `lib/workflow.ts`, plus a test.
-- `pipeline::retranscribe(store, cfg, id, hooks)`:
-  - For each existing track, call `transcribe_samples` (the 012 import path: quiet cuts, offsets)
-    with that track's `Track`.
-  - Merge by start, drop echoes (§3), then `store.replace_transcript(id, &segments)`. That keeps the
-    first live copy as `transcript.live.jsonl`.
-  - Mark the step done (`mark_done(…, "transcript")`). It runs **before** `speakers` and `notes` in
-    the after-call order.
-- `transcribe_samples` gains a `track: Track` parameter instead of hard-coding `Track::Call`.
-  Imports pass `Call`.
-- `speakers::assign` reads the transcript to split. It must use the rebuilt transcript, so after
-  this step `live_transcript()` is no longer the right source for the speakers redo. Add
-  `Store::base_transcript(id)`: the rebuilt one when it exists (`transcript.base.jsonl`, written by
-  `retranscribe`), otherwise the live one. The speakers redo reads it.
-- If the meeting's audio was already deleted (retention 011) or a track is missing, rebuild from
-  what exists, or skip the step when nothing does. Never fail the pipeline.
-- Processing screen: the new step shows as "Transcribing each track" with progress, reusing
-  `hooks`/`JobEvent`.
+- `fofoca-cli bench-latency <call.wav> --mic <mic.wav>` gains the per-track live mode (019 defines
+  the queue options) and **a summary swap every 5 min** (Balanced), which the dropped builds didn't
+  simulate. Report the Decision 6 numbers for mixed against per-track in the same sitting. Run each
+  configuration **twice**: run-to-run variation was about 0.1×.
 
-### 5. One timeline (core, `capture.rs` / `session.rs`)
+### 5. Tests and checks
 
-- `Capture` records `first_sample_at: Instant` when its reader thread gets its first bytes.
-- At session start, once both captures report it, compute `lag = |mic − sys|`. Insert `lag` worth
-  of silence at the start of the later track's buffer **and** WAV, so `t = 0` matches. Log the lag.
-- **Measure before building the fix:** record a 5-minute meeting (with sound on both tracks) and
-  compare each track's sample count with wall-clock time. That shows whether the 2.2 s comes from
-  start lag (constant) or from drift or dropped samples (growing over time).
-  - Start lag: the padding above fixes it.
-  - Drift: out of scope here; write it in Implementation Notes and a follow-up spec.
-- Replay (014) already plays both tracks against the call track as master clock. The padding makes
-  its re-sync smaller and needs no change there.
-
-### 6. Speaker cap (core, `pipeline.rs`)
-
-- `max_speakers = if meta.attendees.len() >= 2 { meta.attendees.len() - 1 } else { (attendees + 1).max(4) }`.
-  The clustering threshold is unchanged.
-- Test: 2 attendees → 1 cluster, even when two embeddings sit just under the threshold.
-- Imports have no attendees and stay as today.
-
-### 7. Tests and checks
-
-- New unit tests: §1, §3, §6, the merge-by-time ordering, the `transcript_after` config
-  round-trip, and the Settings helper.
-- The existing ignored real-model test gets a per-track variant. It is also ignored and run by hand.
-- Hand test (user): a real call with headphones, then one without, then one in record-only mode.
-  Check the You/Call labels in the transcript and the replay.
-- Checks as in the handoff: `cargo test -p fofoca-core`, `cargo test -p fofoca`, clippy
-  warning-free, `npx svelte-check`, `npm test`, `npm run build`.
+- A model-free regression for the original bug: a turn-taking chunk, which the loudness rule
+  labelled Call, gives a Call line and a You line.
+- An ordering test for out-of-order arrival, plus the UI helper test.
+- Checks: `cargo test -p fofoca-core`, `cargo test -p fofoca`,
+  `cargo clippy --workspace --all-targets` (no warnings), and in `app/`:
+  `npx svelte-check && npm test && npm run build`.
+- Hand test: a real call with headphones, Balanced, past the 5-minute summary. Check the labels while
+  taking turns, how far the text lags, and that the backlog empties.
 
 ## Known Gaps
 
-- **Live cost.** About 1.7× the Whisper requests. If the measured text delay or backlog on the
-  MX230 Balanced layout gets clearly worse, the fallback is to put both tracks into **one** request,
-  separated by 1 s of silence, and split the results at the boundary. That's one encoder pass for
-  two tracks. It's left out because the boundary mapping is fragile; build it only if the
-  measurement asks for it.
-- **Overlapping speech** shows as two lines with close start times, one per track. There's no
-  interleaving inside a line.
-- **Clock drift** between the two captures (as opposed to start lag) isn't corrected here (§5).
-- **Echo rule is text-based.** A mic echo that Whisper transcribes differently from the call line
-  can slip through. Acoustic echo cancellation (PipeWire's `echo-cancel` module) is out of scope.
-- **The speaker cap assumes the user is in the invite.** For an invite listing only the remote
-  people, the cap is 1 too low. 015 Settings may later need a "people on the call" override.
-- **Past meetings aren't rebuilt automatically.** A "Re-transcribe" button per meeting would reuse
-  `retranscribe`. It's left for later, and only works where the audio is still kept (011).
+- **Fitting the MX230 is not proven.** The best measured variant was 1.02–1.06×. 019 lists the
+  levers (`--audio-ctx`, a longer minimum slice, which costs label detail). If none fit, the
+  options are a smaller live model, or per-track only while Whisper is idle with mixed under
+  backlog. Each would be its own decision.
+- **Turns glued into one line** still happen within a track when VAD drops the other person's
+  turn. Splitting lines at gaps in word timing is a possible follow-up.
+- **Echo without headphones** gives You lines that repeat the call, live as after the call (020).
+- **Overlapping speech** gives two lines with close starts. There's no interleaving inside a line.
