@@ -1,5 +1,5 @@
-Status: todo
-Branch: —
+Status: doing
+Branch: moacyrricardo/spec-024-github-pages-build
 
 # 024 — GitHub Pages: a landing page with the latest build and install steps
 
