@@ -9,7 +9,8 @@
 </p>
 
 <p align="center">
-  🚧 <em>Pre-alpha — Linux only. <a href="https://github.com/moacyrricardo/fofoca/releases">Test builds</a> (AppImage / .deb) are available; see <a href="#install">Install</a>.</em> 🚧
+  🚧 <em>Pre-alpha — Linux only. <a href="https://github.com/moacyrricardo/fofoca/releases">Test builds</a> (AppImage / .deb) are available; see <a href="#install">Install</a>.</em> 🚧<br>
+  <a href="https://moacyrricardo.github.io/fofoca/"><strong>moacyrricardo.github.io/fofoca</strong></a> — download the newest build and the install steps
 </p>
 
 ---
@@ -28,7 +29,7 @@ best setup that fits** — and let you override it.
 It is also built **pt-BR first**: Brazilian Portuguese is a first-class language, not an
 afterthought. English works just as well.
 
-## What it does (planned)
+## What it does
 
 | | |
 |---|---|
@@ -36,7 +37,7 @@ afterthought. English works just as well.
 | <img src="assets/icons/summary.png" width="72" alt=""> | **Summary** — a local LLM writes a "summary so far" during the call and a final summary when it ends, grounded in the transcript so every claim can be checked. |
 | <img src="assets/icons/tasks.png" width="72" alt=""> | **To-dos & tasks** — action items, decisions, names, numbers and dates pulled out of the meeting. |
 | <img src="assets/icons/local-server.png" width="72" alt=""> | **100% local** — audio, transcripts and notes never leave your computer. Models run as local servers on your GPU or CPU. |
-| <img src="assets/icons/settings.png" width="72" alt=""> | **Auto setup, your control** — fo-foca detects your GPU, VRAM, RAM and CPU, benchmarks the candidate models, and picks the best layout. Every choice can be overridden. |
+| <img src="assets/icons/settings.png" width="72" alt=""> | **Fits your hardware** — choose where each model runs (GPU, CPU, or both on a 2 GB GPU taking turns); a GPU memory meter shows what fits. *Planned:* fo-foca detects your GPU, VRAM, RAM and CPU, benchmarks the candidate models, and picks the layout for you ([spec 002](specs/002-todo-auto-setup.md)). |
 | <img src="assets/icons/launch.png" width="72" alt=""> | **Fast and light** — a native desktop app (Rust + Tauri), not a browser in a box. |
 
 ## How it works
@@ -72,18 +73,19 @@ flowchart LR
 Models run as **separate local server processes**, so fo-foca can load, unload and swap them
 without restarting — and you can update them independently.
 
-### Auto setup: fitting models on small GPUs
+### Fitting models on small GPUs
 
 When everything fits in VRAM, both models stay loaded. When it doesn't, fo-foca **swaps** them:
 Whisper stays on the GPU while you talk, and the LLM is swapped in for summaries — switching costs
-about 3 seconds.
+about 3 seconds. Today you pick the layout in **Settings → Processing**, with a GPU memory meter
+for each choice. **Planned** ([spec 002](specs/002-todo-auto-setup.md)): choosing it automatically —
 
 1. **Detect** — enumerate GPUs (preferring a discrete card with its own VRAM), read *free* VRAM, RAM and CPU threads.
 2. **Plan** — choose a layout from *measured* model footprints (not file sizes), with a safety margin.
 3. **Verify** — load the chosen models and benchmark a short sample on first run.
 4. **Fall back** — if a load runs out of memory, step down to the next layout and say so.
 
-Settings show what was chosen and why, and every piece (device, models, context size, layout,
+Settings will show what was chosen and why, and every piece (device, models, context size, layout,
 summary cadence) can be overridden.
 
 ## Reference numbers
@@ -101,24 +103,34 @@ using whisper.cpp and llama.cpp on Vulkan:
 
 ## Status & roadmap
 
-- [x] Feasibility research and benchmarks on a 2 GB GPU
-- [x] Architecture spec and decision catalog ([`specs/`](specs/CATALOG.md))
-- [x] Audio capture (mic + system audio, separate tracks) — Linux / PipeWire
-- [x] Chunked live transcription with voice detection
-- [x] On-demand "summary so far" (model swap) and final summary
-- [x] Desktop app: meetings, live transcript, notes, settings
-- [ ] Calendar via private iCal link — in progress
-- [ ] Auto setup: hardware probe, layout planner, first-run benchmark
-- [ ] Grounded summaries and task extraction
-- [x] Speaker separation after the call
-- [ ] Desktop UI
-- [ ] Packaging: AppImage and .deb test builds are out; engines are not bundled yet ([spec 006](specs/006-todo-packaging-model-servers.md)). Then Windows and macOS
+Mirrors [`specs/CATALOG.md`](specs/CATALOG.md) — `done` is checked, `todo` is open, a concern is
+*exploring*. Spec numbers in brackets.
+
+- [x] Feasibility research and benchmarks on a 2 GB GPU (001)
+- [x] Live transcript — mic and call on separate tracks, voice detection, adaptive chunks (001, 010)
+- [x] Summary so far, and a final summary and tasks checked against the transcript (001, 005)
+- [x] Speaker separation after the call, with names suggested from the invite (003, 022)
+- [x] After the call, mic and call transcribed separately, re-run on demand (020)
+- [x] Calendar via a private iCal link (004)
+- [x] Meeting labels, set automatically from the calendar (007, 009)
+- [x] Pause and resume a recording (010)
+- [x] Import a recording made elsewhere (012)
+- [x] Replay a meeting with its audio (011, 014)
+- [x] Settings: where each model runs (GPU / CPU / swap), model downloads (015)
+- [x] Tasks across meetings, filtered by label (016)
+- [x] Tray icon: start, stop, show / hide (017)
+- [x] Export a meeting: transcript, notes, tasks, audio (023)
+- [ ] Live transcript per track during the call ([018](specs/018-todo-per-track-transcription.md))
+- [ ] Auto setup: hardware probe, layout planner, first-run benchmark ([002](specs/002-todo-auto-setup.md))
+- [ ] Packaging: AppImage and .deb test builds are out; engines are not bundled yet ([006](specs/006-todo-packaging-model-servers.md)). Then Windows and macOS
+- [ ] *Exploring:* a local MCP server so assistants can read your meetings ([008](specs/008-concern-mcp-server.md))
 
 ## Install
 
-Linux x86-64, test builds only. Each build is a pre-release on the
-[Releases page](https://github.com/moacyrricardo/fofoca/releases); the first is
-[`v0.1.0-pr32`](https://github.com/moacyrricardo/fofoca/releases/tag/v0.1.0-pr32).
+Linux x86-64, test builds only. Each build is on the
+[Releases page](https://github.com/moacyrricardo/fofoca/releases); the
+[project site](https://moacyrricardo.github.io/fofoca/#install) links the newest one and has the same
+steps.
 
 1. Install the system pieces (Debian/Ubuntu names):
    ```bash
